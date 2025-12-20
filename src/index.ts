@@ -379,6 +379,8 @@ const logLines: string[] = [];
 let paused = false;
 let scheduledRender = false;
 let initializing = true;
+let isShuttingDown = false;
+let flushTimer: NodeJS.Timeout | undefined;
 
 const merger = new LogMerger(
   {
@@ -600,10 +602,23 @@ const directoryWatcher = fs.watch(directory, { persistent: true }, (eventType, f
   }
 });
 
+function shutdown(exitCode: number): void {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  directoryWatcher.close();
+  for (const state of fileStates.values()) {
+    state.watcher?.close();
+  }
+  if (flushTimer) {
+    clearInterval(flushTimer);
+  }
+  renderer.destroy();
+  process.exit(exitCode);
+}
+
 renderer.keyInput.on("keypress", (key) => {
   if (key.name === "q") {
-    directoryWatcher.close();
-    process.exit(0);
+    shutdown(0);
   }
 
   if (key.name === "p" || key.name === "space") {
@@ -628,7 +643,7 @@ renderer.keyInput.on("keypress", (key) => {
   }
 });
 
-setInterval(() => {
+flushTimer = setInterval(() => {
   if (!paused && !initializing) {
     merger.flushReady();
   }
@@ -641,6 +656,8 @@ await scanDirectory();
 initializing = false;
 
 process.on("SIGINT", () => {
-  directoryWatcher.close();
-  process.exit(0);
+  shutdown(0);
+});
+process.on("SIGTERM", () => {
+  shutdown(0);
 });
