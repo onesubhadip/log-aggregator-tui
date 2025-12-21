@@ -55,6 +55,14 @@ type FileRow = {
   selected: boolean;
 };
 
+type StreamRow = {
+  filePath: string;
+  fileName: string;
+  row: BoxRenderable;
+  label: TextRenderable;
+  enabled: boolean;
+};
+
 type RenderLine = {
   chunks: TextChunk[];
   entryIndex: number;
@@ -466,6 +474,27 @@ const headerText = new TextRenderable(renderer, {
 });
 header.add(headerText);
 
+const logMain = new BoxRenderable(renderer, {
+  flexGrow: 1,
+  flexDirection: "row",
+  gap: 1,
+});
+
+const streamPanel = new BoxRenderable(renderer, {
+  width: 28,
+  border: true,
+  title: "Files",
+  padding: 1,
+  flexDirection: "column",
+  gap: 0,
+});
+const streamList = new BoxRenderable(renderer, {
+  flexDirection: "column",
+  gap: 0,
+  flexGrow: 1,
+});
+streamPanel.add(streamList);
+
 const logBox = new BoxRenderable(renderer, {
   flexGrow: 1,
   overflow: "hidden",
@@ -494,12 +523,14 @@ const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
   content:
-    "q quit | b back | p/space pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
+    "q quit | b back | tab files | space toggle (files) | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
 });
 footer.add(footerText);
 
 logView.add(header);
-logView.add(logBox);
+logMain.add(streamPanel);
+logMain.add(logBox);
+logView.add(logMain);
 logView.add(footer);
 
 const fileStates = new Map<string, FileState>();
@@ -507,8 +538,12 @@ const pendingFiles = new Set<string>();
 const logEntries: LogLine[] = [];
 const selectedFiles = new Set<string>();
 const fileRows: FileRow[] = [];
+const streamRows: StreamRow[] = [];
+const enabledSources = new Set<string>();
 let selectionCursor = 0;
 let selectionActive = true;
+let streamCursor = 0;
+let streamPanelFocused = false;
 
 let paused = false;
 let scheduledRender = false;
@@ -702,6 +737,9 @@ function buildRenderedLines(entries: LogLine[]): RenderLine[] {
   const lines: RenderLine[] = [];
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i];
+    if (entry.source !== "system" && !enabledSources.has(entry.source)) {
+      continue;
+    }
     const prefixInfo = buildPrefixInfo(entry);
     if (!entry.json) {
       lines.push(makeRenderLine(prefixInfo.chunks, entry.line, i));
@@ -899,7 +937,7 @@ function scheduleRender(): void {
 
 function updateStatus(): void {
   const statusLine = paused ? "PAUSED" : "LIVE";
-  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Entries: ${logEntries.length}/${cliOptions.maxLines} | View lines: ${renderedLines.length}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
+  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Enabled: ${enabledSources.size}/${streamRows.length} | Entries: ${logEntries.length}/${cliOptions.maxLines} | View lines: ${renderedLines.length}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
 }
 
 function updateSelectionHeader(): void {
@@ -934,6 +972,98 @@ function refreshSelectionUI(): void {
   });
   updateSelectionHeader();
   updateStartButton();
+}
+
+function updateStreamPanelTitle(): void {
+  streamPanel.title = `Files (${enabledSources.size}/${streamRows.length})`;
+}
+
+function updateStreamRow(row: StreamRow, index: number): void {
+  const isCursor = streamPanelFocused && index === streamCursor;
+  const isEnabled = row.enabled;
+  row.label.content = `${isEnabled ? "[x]" : "[ ]"} ${row.fileName}`;
+
+  if (isCursor && isEnabled) {
+    row.row.backgroundColor = ROW_CURSOR_SELECTED_BG;
+  } else if (isEnabled) {
+    row.row.backgroundColor = ROW_SELECTED_BG;
+  } else if (isCursor) {
+    row.row.backgroundColor = ROW_CURSOR_BG;
+  } else {
+    row.row.backgroundColor = "transparent";
+  }
+}
+
+function refreshStreamPanel(): void {
+  streamRows.forEach((row, index) => {
+    updateStreamRow(row, index);
+  });
+  updateStreamPanelTitle();
+}
+
+function toggleStreamRow(index: number): void {
+  const row = streamRows[index];
+  if (!row) return;
+  row.enabled = !row.enabled;
+  if (row.enabled) {
+    enabledSources.add(row.fileName);
+  } else {
+    enabledSources.delete(row.fileName);
+  }
+  refreshStreamPanel();
+  scheduleRender();
+}
+
+function setStreamCursor(index: number): void {
+  if (streamRows.length === 0) {
+    streamCursor = 0;
+    return;
+  }
+  streamCursor = Math.max(0, Math.min(index, streamRows.length - 1));
+  refreshStreamPanel();
+}
+
+function populateStreamPanel(): void {
+  streamRows.length = 0;
+  enabledSources.clear();
+
+  const existing = streamList.getChildren();
+  for (const child of existing) {
+    streamList.remove(child.id);
+  }
+
+  const sorted = Array.from(selectedFiles).sort((a, b) => {
+    return path.basename(a).localeCompare(path.basename(b));
+  });
+
+  for (const filePath of sorted) {
+    const fileName = path.basename(filePath);
+    const row = new BoxRenderable(renderer, {
+      height: 1,
+      width: "100%",
+      backgroundColor: "transparent",
+    });
+    const label = new TextRenderable(renderer, {
+      wrapMode: "none",
+      content: `[x] ${fileName}`,
+    });
+    row.add(label);
+    const rowEntry: StreamRow = { filePath, fileName, row, label, enabled: true };
+    row.onMouseDown = () => {
+      const index = streamRows.indexOf(rowEntry);
+      if (index >= 0) {
+        streamCursor = index;
+        toggleStreamRow(index);
+      }
+    };
+    streamRows.push(rowEntry);
+    enabledSources.add(fileName);
+    streamList.add(row);
+  }
+
+  streamCursor = 0;
+  streamPanelFocused = false;
+  refreshStreamPanel();
 }
 
 function toggleSelection(index: number): void {
@@ -1018,6 +1148,7 @@ async function startStreaming(): Promise<void> {
   selectionView.visible = false;
   logView.visible = true;
   renderer.useMouse = false;
+  populateStreamPanel();
 
   await resetStreamState();
 }
@@ -1064,6 +1195,16 @@ async function returnToSelection(): Promise<void> {
   followTailEnabled = true;
   logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
   logText.scrollY = 0;
+
+  streamRows.length = 0;
+  enabledSources.clear();
+  streamCursor = 0;
+  streamPanelFocused = false;
+  const existing = streamList.getChildren();
+  for (const child of existing) {
+    streamList.remove(child.id);
+  }
+  updateStreamPanelTitle();
 
   await populateSelectionList(true);
 }
@@ -1254,6 +1395,25 @@ renderer.keyInput.on("keypress", (key) => {
   const viewportHeight = Math.max(1, logText.height || 1);
   const pageSize = Math.max(1, viewportHeight - 1);
   const keyName = key.name?.toLowerCase();
+  if (keyName === "tab") {
+    streamPanelFocused = !streamPanelFocused;
+    refreshStreamPanel();
+    return;
+  }
+  if (streamPanelFocused) {
+    if (keyName === "up" || keyName === "k") {
+      setStreamCursor(streamCursor - 1);
+      return;
+    }
+    if (keyName === "down" || keyName === "j") {
+      setStreamCursor(streamCursor + 1);
+      return;
+    }
+    if (keyName === "space" || keyName === "enter" || keyName === "return") {
+      toggleStreamRow(streamCursor);
+      return;
+    }
+  }
   if (keyName === "up" || keyName === "k") {
     moveCursor(-1);
     return;
