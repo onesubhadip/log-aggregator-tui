@@ -700,10 +700,21 @@ function setSelectionCursor(index: number): void {
   refreshSelectionUI();
 }
 
-async function populateSelectionList(): Promise<void> {
+async function populateSelectionList(preserveSelections: boolean): Promise<void> {
   const files = await listLogFiles();
   fileRows.length = 0;
-  selectedFiles.clear();
+  if (!preserveSelections) {
+    selectedFiles.clear();
+  }
+
+  const fileSet = new Set(files);
+  if (preserveSelections) {
+    for (const filePath of selectedFiles) {
+      if (!fileSet.has(filePath)) {
+        selectedFiles.delete(filePath);
+      }
+    }
+  }
 
   const existing = selectionList.getChildren();
   for (const child of existing) {
@@ -722,7 +733,8 @@ async function populateSelectionList(): Promise<void> {
       content: `[ ] ${fileName}`,
     });
     row.add(label);
-    const rowEntry: FileRow = { filePath, fileName, row, label, selected: false };
+    const isSelected = selectedFiles.has(filePath);
+    const rowEntry: FileRow = { filePath, fileName, row, label, selected: isSelected };
     row.onMouseDown = () => {
       const index = fileRows.indexOf(rowEntry);
       if (index >= 0) {
@@ -734,7 +746,12 @@ async function populateSelectionList(): Promise<void> {
     selectionList.add(row);
   }
 
-  selectionCursor = 0;
+  if (preserveSelections && selectedFiles.size > 0) {
+    const firstSelected = fileRows.findIndex((row) => row.selected);
+    selectionCursor = firstSelected >= 0 ? firstSelected : 0;
+  } else {
+    selectionCursor = 0;
+  }
   refreshSelectionUI();
 }
 
@@ -789,7 +806,7 @@ async function returnToSelection(): Promise<void> {
   logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
   logText.scrollY = 0;
 
-  await populateSelectionList();
+  await populateSelectionList(true);
 }
 
 function parseTimestamp(line: string, state: FileState): number {
@@ -1035,7 +1052,7 @@ flushTimer = setInterval(() => {
 }, 100);
 
 selectionHeaderText.content = "Loading log files...";
-await populateSelectionList();
+await populateSelectionList(false);
 initializing = false;
 
 process.on("SIGINT", () => {
