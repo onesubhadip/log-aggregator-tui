@@ -39,6 +39,12 @@ type LogLine = {
   timestamp: number;
   line: string;
   source: string;
+  json?: JsonInfo;
+};
+
+type JsonInfo = {
+  value: unknown;
+  collapsed: Set<string>;
 };
 
 type FileRow = {
@@ -47,6 +53,13 @@ type FileRow = {
   row: BoxRenderable;
   label: TextRenderable;
   selected: boolean;
+};
+
+type RenderLine = {
+  chunks: TextChunk[];
+  entryIndex: number;
+  nodePath?: string;
+  togglePath?: string;
 };
 
 type FileState = {
@@ -480,7 +493,7 @@ const footer = new BoxRenderable(renderer, {
 const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
-  content: "q quit | b back | p/space pause | f follow | c clear | arrows/pg scroll",
+  content: "q quit | b back | p/space pause | f follow | c clear | e expand/collapse | arrows/pg scroll",
 });
 footer.add(footerText);
 
@@ -503,6 +516,7 @@ let isShuttingDown = false;
 let flushTimer: NodeJS.Timeout | undefined;
 let cursorIndex = 0;
 let followTailEnabled = true;
+let renderedLines: RenderLine[] = [];
 
 const merger = new LogMerger(
   {
@@ -544,34 +558,171 @@ function colorForSource(source: string): string {
   return color;
 }
 
-function formatEventStyled(event: LogLine): StyledText {
+function parseJsonInfo(line: string): JsonInfo | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+    return undefined;
+  }
+  try {
+    return { value: JSON.parse(trimmed), collapsed: new Set<string>() };
+  } catch {
+    return undefined;
+  }
+}
+
+function buildPrefixInfo(event: LogLine): { chunks: TextChunk[]; text: string } {
   const time = formatTimestamp(event.timestamp);
   const sourceColor = colorForSource(event.source);
   const sourceLabel = `[${event.source}]`;
-  return new StyledText([
-    dim(time),
-    { __isChunk: true, text: " ", attributes: 0 },
-    fg(sourceColor)(sourceLabel),
-    { __isChunk: true, text: " ", attributes: 0 },
-    { __isChunk: true, text: event.line, attributes: 0 },
-  ]);
+  const text = `${time} ${sourceLabel} `;
+  return {
+    text,
+    chunks: [
+      dim(time),
+      { __isChunk: true, text: " ", attributes: 0 },
+      fg(sourceColor)(sourceLabel),
+      { __isChunk: true, text: " ", attributes: 0 },
+    ],
+  };
 }
 
-function applyCursorHighlight(styled: StyledText): StyledText {
-  const applyBg = bg(CURSOR_BG);
-  return new StyledText(styled.chunks.map((chunk) => applyBg(chunk)));
+function formatJsonValue(value: unknown): string {
+  const formatted = JSON.stringify(value);
+  return formatted ?? String(value);
 }
 
-function buildStyledLog(entries: LogLine[]): StyledText {
-  if (entries.length === 0) {
+function escapeJsonPathSegment(segment: string): string {
+  return segment.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
+function joinJsonPath(parent: string, segment: string): string {
+  const escaped = escapeJsonPathSegment(segment);
+  if (parent === "$") {
+    return `$/${escaped}`;
+  }
+  return `${parent}/${escaped}`;
+}
+
+function makeRenderLine(
+  prefix: TextChunk[],
+  text: string,
+  entryIndex: number,
+  nodePath?: string,
+  togglePath?: string,
+): RenderLine {
+  return {
+    chunks: [...prefix, { __isChunk: true, text, attributes: 0 }],
+    entryIndex,
+    nodePath,
+    togglePath,
+  };
+}
+
+function buildJsonRenderLines(
+  event: LogLine,
+  entryIndex: number,
+  prefixInfo: { chunks: TextChunk[]; text: string },
+): RenderLine[] {
+  const info = event.json;
+  if (!info) return [];
+
+  const lines: RenderLine[] = [];
+  const collapsed = info.collapsed;
+  const continuationPrefix: TextChunk[] = [
+    { __isChunk: true, text: " ".repeat(prefixInfo.text.length), attributes: 0 },
+  ];
+  let usedPrefix = false;
+
+  const makeLine = (text: string, nodePath?: string, togglePath?: string): void => {
+    const prefix = usedPrefix ? continuationPrefix : prefixInfo.chunks;
+    usedPrefix = true;
+    lines.push(makeRenderLine(prefix, text, entryIndex, nodePath, togglePath));
+  };
+
+  const renderNode = (
+    node: unknown,
+    path: string,
+    depth: number,
+    label?: string,
+    parentContainerPath?: string,
+  ): void => {
+    const indent = " ".repeat(depth * 2);
+    const labelPrefix = label ? `${label}: ` : "";
+
+    if (node !== null && typeof node === "object") {
+      const isArray = Array.isArray(node);
+      const childCount = isArray ? node.length : Object.keys(node as Record<string, unknown>).length;
+
+      if (childCount === 0) {
+        const emptyToken = isArray ? "[]" : "{}";
+        makeLine(`${indent}${labelPrefix}${emptyToken}`);
+        return;
+      }
+
+      const containerPath = path;
+      const isCollapsed = collapsed.has(path);
+      const openToken = isArray ? "[" : "{";
+      const closeToken = isArray ? "]" : "}";
+      const indicator = isCollapsed ? "+" : "-";
+
+      if (isCollapsed) {
+        const raw = formatJsonValue(node);
+        makeLine(`${indent}${indicator} ${labelPrefix}${raw}`, path, containerPath);
+        return;
+      }
+
+      makeLine(`${indent}${indicator} ${labelPrefix}${openToken}`, path, containerPath);
+      if (isArray) {
+        const list = node as unknown[];
+        for (let index = 0; index < list.length; index += 1) {
+          const child = list[index];
+          const childPath = joinJsonPath(path, String(index));
+          renderNode(child, childPath, depth + 1, `[${index}]`, containerPath);
+        }
+      } else {
+        const record = node as Record<string, unknown>;
+        for (const [key, child] of Object.entries(record)) {
+          const childPath = joinJsonPath(path, key);
+          renderNode(child, childPath, depth + 1, JSON.stringify(key), containerPath);
+        }
+      }
+      makeLine(`${indent}${closeToken}`, path, containerPath);
+      return;
+    }
+
+    makeLine(`${indent}${labelPrefix}${formatJsonValue(node)}`, undefined, parentContainerPath);
+  };
+
+  renderNode(info.value, "$", 0, undefined, undefined);
+  return lines;
+}
+
+function buildRenderedLines(entries: LogLine[]): RenderLine[] {
+  const lines: RenderLine[] = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = entries[i];
+    const prefixInfo = buildPrefixInfo(entry);
+    if (!entry.json) {
+      lines.push(makeRenderLine(prefixInfo.chunks, entry.line, i));
+      continue;
+    }
+    lines.push(...buildJsonRenderLines(entry, i, prefixInfo));
+  }
+  return lines;
+}
+
+function buildStyledFromRendered(lines: RenderLine[], highlightIndex: number): StyledText {
+  if (lines.length === 0) {
     return new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
   }
 
   const chunks: TextChunk[] = [];
-  for (let i = 0; i < entries.length; i += 1) {
-    const styled = i === cursorIndex ? applyCursorHighlight(formatEventStyled(entries[i])) : formatEventStyled(entries[i]);
-    chunks.push(...styled.chunks);
-    if (i < entries.length - 1) {
+  const applyBg = bg(CURSOR_BG);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const lineChunks = i === highlightIndex ? line.chunks.map((chunk) => applyBg(chunk)) : line.chunks;
+    chunks.push(...lineChunks);
+    if (i < lines.length - 1) {
       chunks.push({ __isChunk: true, text: "\n", attributes: 0 });
     }
   }
@@ -579,16 +730,40 @@ function buildStyledLog(entries: LogLine[]): StyledText {
 }
 
 function appendEvent(event: LogLine): void {
+  if (!event.json) {
+    const parsed = parseJsonInfo(event.line);
+    if (parsed) {
+      event.json = parsed;
+    }
+  }
   logEntries.push(event);
   if (logEntries.length > cliOptions.maxLines) {
     const removed = logEntries.length - cliOptions.maxLines;
     logEntries.splice(0, removed);
-    cursorIndex = Math.max(0, cursorIndex - removed);
+    if (renderedLines.length > 0) {
+      let removedLineCount = 0;
+      for (const line of renderedLines) {
+        if (line.entryIndex < removed) {
+          removedLineCount += 1;
+        }
+      }
+      cursorIndex = Math.max(0, cursorIndex - removedLineCount);
+    } else {
+      cursorIndex = Math.max(0, cursorIndex - removed);
+    }
   }
   scheduleRender();
 }
 
 function ensureCursorVisible(): void {
+  if (renderedLines.length === 0) {
+    cursorIndex = 0;
+    return;
+  }
+  const maxIndex = renderedLines.length - 1;
+  if (cursorIndex > maxIndex) {
+    cursorIndex = maxIndex;
+  }
   const viewportHeight = Math.max(1, logText.height || 1);
   const top = logText.scrollY;
   const bottom = top + viewportHeight - 1;
@@ -604,25 +779,49 @@ function ensureCursorVisible(): void {
 }
 
 function setCursor(index: number): void {
-  if (logEntries.length === 0) {
+  if (renderedLines.length === 0) {
     cursorIndex = 0;
     return;
   }
-  cursorIndex = Math.max(0, Math.min(index, logEntries.length - 1));
+  cursorIndex = Math.max(0, Math.min(index, renderedLines.length - 1));
   ensureCursorVisible();
   scheduleRender();
 }
 
 function moveCursor(delta: number): void {
-  if (logEntries.length === 0) return;
+  if (renderedLines.length === 0) return;
   followTailEnabled = false;
   setCursor(cursorIndex + delta);
 }
 
 function followTail(): void {
   followTailEnabled = true;
-  cursorIndex = Math.max(0, logEntries.length - 1);
+  cursorIndex = Math.max(0, renderedLines.length - 1);
   logText.scrollY = logText.maxScrollY;
+  scheduleRender();
+}
+
+function toggleJsonAtCursor(): void {
+  const line = renderedLines[cursorIndex];
+  if (!line) return;
+  const entry = logEntries[line.entryIndex];
+  if (!entry?.json) return;
+  const togglePath = line.togglePath ?? line.nodePath;
+  if (!togglePath) return;
+  if (entry.json.collapsed.has(togglePath)) {
+    entry.json.collapsed.delete(togglePath);
+  } else {
+    followTailEnabled = false;
+    for (let i = cursorIndex; i >= 0; i -= 1) {
+      const candidate = renderedLines[i];
+      if (candidate.entryIndex !== line.entryIndex) break;
+      if (candidate.nodePath === togglePath) {
+        cursorIndex = i;
+        break;
+      }
+    }
+    entry.json.collapsed.add(togglePath);
+  }
   scheduleRender();
 }
 
@@ -631,10 +830,22 @@ function scheduleRender(): void {
   scheduledRender = true;
   setTimeout(() => {
     scheduledRender = false;
-    logText.content = buildStyledLog(logEntries);
+    renderedLines = buildRenderedLines(logEntries);
     if (followTailEnabled) {
-      cursorIndex = Math.max(0, logEntries.length - 1);
+      cursorIndex = Math.max(0, renderedLines.length - 1);
+    } else if (renderedLines.length > 0) {
+      cursorIndex = Math.max(0, Math.min(cursorIndex, renderedLines.length - 1));
+    } else {
+      cursorIndex = 0;
+    }
+    logText.content = buildStyledFromRendered(renderedLines, cursorIndex);
+    if (logText.scrollY > logText.maxScrollY) {
       logText.scrollY = logText.maxScrollY;
+    }
+    if (followTailEnabled) {
+      logText.scrollY = logText.maxScrollY;
+    } else {
+      ensureCursorVisible();
     }
     updateStatus();
   }, 16);
@@ -642,7 +853,7 @@ function scheduleRender(): void {
 
 function updateStatus(): void {
   const statusLine = paused ? "PAUSED" : "LIVE";
-  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Lines: ${logEntries.length}/${cliOptions.maxLines}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
+  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Entries: ${logEntries.length}/${cliOptions.maxLines} | View lines: ${renderedLines.length}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
 }
 
 function updateSelectionHeader(): void {
@@ -768,6 +979,7 @@ async function startStreaming(): Promise<void> {
 async function resetStreamState(): Promise<void> {
   initializing = true;
   logEntries.length = 0;
+  renderedLines = [];
   cursorIndex = 0;
   followTailEnabled = true;
   logText.scrollY = 0;
@@ -801,6 +1013,7 @@ async function returnToSelection(): Promise<void> {
   pendingFiles.clear();
 
   logEntries.length = 0;
+  renderedLines = [];
   cursorIndex = 0;
   followTailEnabled = true;
   logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
@@ -1020,6 +1233,10 @@ renderer.keyInput.on("keypress", (key) => {
     followTail();
     return;
   }
+  if (keyName === "e") {
+    toggleJsonAtCursor();
+    return;
+  }
 
   if (key.name === "p" || key.name === "space") {
     paused = !paused;
@@ -1036,8 +1253,10 @@ renderer.keyInput.on("keypress", (key) => {
 
   if (key.name === "c") {
     logEntries.length = 0;
+    renderedLines = [];
     cursorIndex = 0;
     logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
+    logText.scrollY = 0;
     updateStatus();
   }
 });
