@@ -480,7 +480,7 @@ const footer = new BoxRenderable(renderer, {
 const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
-  content: "q quit | p/space pause | f follow | c clear | arrows/pg scroll",
+  content: "q quit | b back | p/space pause | f follow | c clear | arrows/pg scroll",
 });
 footer.add(footerText);
 
@@ -705,6 +705,11 @@ async function populateSelectionList(): Promise<void> {
   fileRows.length = 0;
   selectedFiles.clear();
 
+  const existing = selectionList.getChildren();
+  for (const child of existing) {
+    selectionList.remove(child.id);
+  }
+
   for (const filePath of files) {
     const fileName = path.basename(filePath);
     const row = new BoxRenderable(renderer, {
@@ -740,11 +745,21 @@ async function startStreaming(): Promise<void> {
   logView.visible = true;
   renderer.useMouse = false;
 
+  await resetStreamState();
+}
+
+async function resetStreamState(): Promise<void> {
   initializing = true;
   logEntries.length = 0;
-  logEntries.push({ timestamp: Date.now(), source: "system", line: "Starting log stream..." });
+  cursorIndex = 0;
   followTailEnabled = true;
-  cursorIndex = Math.max(0, logEntries.length - 1);
+  logText.scrollY = 0;
+
+  for (const state of fileStates.values()) {
+    state.watcher?.close();
+  }
+  fileStates.clear();
+  pendingFiles.clear();
 
   for (const filePath of selectedFiles) {
     await startWatchingFile(filePath);
@@ -753,6 +768,28 @@ async function startStreaming(): Promise<void> {
   merger.flushAll();
   scheduleRender();
   initializing = false;
+}
+
+async function returnToSelection(): Promise<void> {
+  if (selectionActive) return;
+  selectionActive = true;
+  selectionView.visible = true;
+  logView.visible = false;
+  renderer.useMouse = true;
+
+  for (const state of fileStates.values()) {
+    state.watcher?.close();
+  }
+  fileStates.clear();
+  pendingFiles.clear();
+
+  logEntries.length = 0;
+  cursorIndex = 0;
+  followTailEnabled = true;
+  logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
+  logText.scrollY = 0;
+
+  await populateSelectionList();
 }
 
 function parseTimestamp(line: string, state: FileState): number {
@@ -930,6 +967,11 @@ renderer.keyInput.on("keypress", (key) => {
       void startStreaming();
       return;
     }
+    return;
+  }
+
+  if (key.name === "b") {
+    void returnToSelection();
     return;
   }
 

@@ -40,6 +40,7 @@ On launch, you will see a file list. Click (or use `↑/↓` + `space`) to selec
 - `q`: quit
 - `Enter`: start streaming (selection screen)
 - `space`: toggle file selection (selection screen)
+- `b`: back to selection screen (clears stream)
 - `p` or `space`: pause/resume
 - `f`: follow (jump to bottom)
 - `c`: clear the viewport
