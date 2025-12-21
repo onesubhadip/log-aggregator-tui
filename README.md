@@ -37,3 +37,7 @@ bun run src/index.ts --dir /path/to/logs
 - `p` or `space`: pause/resume
 - `f`: follow (jump to bottom)
 - `c`: clear the viewport
+- `m`: toggle mouse mode
+  - app mode: mouse scrolling inside the TUI
+  - terminal mode: native selection + `Cmd+C` copy
+  - log pane is borderless to avoid copying UI border characters

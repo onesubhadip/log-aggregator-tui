@@ -309,7 +309,7 @@ if (!dirStat || !dirStat.isDirectory()) {
   process.exit(1);
 }
 
-const renderer = await createCliRenderer({ exitOnCtrlC: true });
+const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: true });
 
 const layout = new BoxRenderable(renderer, {
   flexDirection: "column",
@@ -335,8 +335,6 @@ header.add(headerText);
 
 const logBox = new ScrollBoxRenderable(renderer, {
   flexGrow: 1,
-  border: true,
-  title: "Merged Logs",
   stickyScroll: true,
   stickyStart: "bottom",
   scrollX: true,
@@ -350,6 +348,8 @@ const logBox = new ScrollBoxRenderable(renderer, {
 const logText = new TextRenderable(renderer, {
   wrapMode: "none",
   content: "",
+  selectionBg: "#335577",
+  selectionFg: "#ffffff",
 });
 logBox.add(logText);
 
@@ -363,7 +363,7 @@ const footer = new BoxRenderable(renderer, {
 const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
-  content: "q quit | p/space pause | f follow | c clear",
+  content: "q quit | p/space pause | f follow | c clear | m mouse mode",
 });
 footer.add(footerText);
 
@@ -381,6 +381,7 @@ let scheduledRender = false;
 let initializing = true;
 let isShuttingDown = false;
 let flushTimer: NodeJS.Timeout | undefined;
+let mouseCaptureEnabled = true;
 
 const merger = new LogMerger(
   {
@@ -423,7 +424,8 @@ function scheduleRender(): void {
 
 function updateStatus(): void {
   const statusLine = paused ? "PAUSED" : "LIVE";
-  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Lines: ${logLines.length}/${cliOptions.maxLines}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
+  const mouseMode = mouseCaptureEnabled ? "app" : "terminal";
+  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Lines: ${logLines.length}/${cliOptions.maxLines}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize} | Mouse: ${mouseMode}`;
 }
 
 function parseTimestamp(line: string, state: FileState): number {
@@ -619,6 +621,12 @@ function shutdown(exitCode: number): void {
 renderer.keyInput.on("keypress", (key) => {
   if (key.name === "q") {
     shutdown(0);
+  }
+
+  if (key.name === "m") {
+    mouseCaptureEnabled = !mouseCaptureEnabled;
+    renderer.useMouse = mouseCaptureEnabled;
+    updateStatus();
   }
 
   if (key.name === "p" || key.name === "space") {
