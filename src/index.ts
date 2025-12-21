@@ -493,7 +493,8 @@ const footer = new BoxRenderable(renderer, {
 const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
-  content: "q quit | b back | p/space pause | f follow | c clear | e expand/collapse | arrows/pg scroll",
+  content:
+    "q quit | b back | p/space pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
 });
 footer.add(footerText);
 
@@ -823,6 +824,51 @@ function toggleJsonAtCursor(): void {
     entry.json.collapsed.add(togglePath);
   }
   scheduleRender();
+}
+
+function expandAllJson(): void {
+  let changed = false;
+  for (const entry of logEntries) {
+    if (!entry.json) continue;
+    if (entry.json.collapsed.size > 0) {
+      entry.json.collapsed.clear();
+      changed = true;
+    }
+  }
+  if (changed) {
+    followTailEnabled = false;
+    scheduleRender();
+  }
+}
+
+function collapseAllJson(): void {
+  const line = renderedLines[cursorIndex];
+  const targetEntryIndex = line?.entryIndex;
+  let changed = false;
+
+  for (const entry of logEntries) {
+    if (!entry.json) continue;
+    if (!entry.json.collapsed.has("$") || entry.json.collapsed.size !== 1) {
+      entry.json.collapsed.clear();
+      entry.json.collapsed.add("$");
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    followTailEnabled = false;
+    if (targetEntryIndex !== undefined) {
+      for (let i = 0; i < renderedLines.length; i += 1) {
+        const candidate = renderedLines[i];
+        if (candidate.entryIndex !== targetEntryIndex) continue;
+        if (candidate.nodePath === "$") {
+          cursorIndex = i;
+          break;
+        }
+      }
+    }
+    scheduleRender();
+  }
 }
 
 function scheduleRender(): void {
@@ -1235,6 +1281,14 @@ renderer.keyInput.on("keypress", (key) => {
   }
   if (keyName === "e") {
     toggleJsonAtCursor();
+    return;
+  }
+  if (keyName === "a") {
+    expandAllJson();
+    return;
+  }
+  if (keyName === "x") {
+    collapseAllJson();
     return;
   }
 
