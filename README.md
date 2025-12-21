@@ -19,6 +19,10 @@ bun install
 bun run src/index.ts --dir /path/to/logs
 ```
 
+## Startup Selection
+
+On launch, you will see a file list. Click (or use `↑/↓` + `space`) to select files. Press `Enter` or click `Start` to begin streaming.
+
 ### Options
 
 - `--dir` (default: `.`): Folder to scan for log files
@@ -34,6 +38,8 @@ bun run src/index.ts --dir /path/to/logs
 ## Key Bindings
 
 - `q`: quit
+- `Enter`: start streaming (selection screen)
+- `space`: toggle file selection (selection screen)
 - `p` or `space`: pause/resume
 - `f`: follow (jump to bottom)
 - `c`: clear the viewport

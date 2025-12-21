@@ -41,6 +41,14 @@ type LogLine = {
   source: string;
 };
 
+type FileRow = {
+  filePath: string;
+  fileName: string;
+  row: BoxRenderable;
+  label: TextRenderable;
+  selected: boolean;
+};
+
 type FileState = {
   filePath: string;
   displayName: string;
@@ -80,6 +88,11 @@ const SOURCE_COLORS = [
 ] as const;
 const SYSTEM_COLOR = "#6B7280";
 const CURSOR_BG = "#2D333B";
+const ROW_CURSOR_BG = "#1F2937";
+const ROW_SELECTED_BG = "#243B53";
+const ROW_CURSOR_SELECTED_BG = "#2E4A6B";
+const START_ENABLED_BG = "#1D4ED8";
+const START_DISABLED_BG = "#374151";
 const sourceColorMap = new Map<string, string>();
 let nextSourceColorIndex = 0;
 
@@ -334,15 +347,97 @@ if (!dirStat || !dirStat.isDirectory()) {
   process.exit(1);
 }
 
-const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: false });
+const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: true });
 
-const layout = new BoxRenderable(renderer, {
-  flexDirection: "column",
+const selectionView = new BoxRenderable(renderer, {
+  position: "absolute",
   width: "100%",
   height: "100%",
+  flexDirection: "column",
   padding: 1,
   gap: 1,
 });
+
+const logView = new BoxRenderable(renderer, {
+  position: "absolute",
+  width: "100%",
+  height: "100%",
+  flexDirection: "column",
+  padding: 1,
+  gap: 1,
+  visible: false,
+});
+
+renderer.root.add(selectionView);
+renderer.root.add(logView);
+
+const selectionHeader = new BoxRenderable(renderer, {
+  height: 4,
+  border: true,
+  title: "Select Log Files",
+  paddingLeft: 1,
+  paddingRight: 1,
+});
+const selectionHeaderText = new TextRenderable(renderer, {
+  wrapMode: "none",
+  attributes: TextAttributes.DIM,
+  content: "",
+});
+selectionHeader.add(selectionHeaderText);
+
+const selectionListPanel = new BoxRenderable(renderer, {
+  flexGrow: 1,
+  border: true,
+  title: "Files",
+  padding: 1,
+  flexDirection: "column",
+  gap: 0,
+});
+const selectionList = new BoxRenderable(renderer, {
+  flexDirection: "column",
+  gap: 0,
+  flexGrow: 1,
+});
+selectionListPanel.add(selectionList);
+
+const selectionFooter = new BoxRenderable(renderer, {
+  height: 3,
+  border: true,
+  title: "Actions",
+  paddingLeft: 1,
+  paddingRight: 1,
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+});
+const selectionFooterText = new TextRenderable(renderer, {
+  wrapMode: "none",
+  attributes: TextAttributes.DIM,
+  content: "Click/space to toggle, Enter to start, q to quit",
+});
+const startButton = new BoxRenderable(renderer, {
+  height: 1,
+  paddingLeft: 2,
+  paddingRight: 2,
+  backgroundColor: START_DISABLED_BG,
+  justifyContent: "center",
+  alignItems: "center",
+});
+const startButtonText = new TextRenderable(renderer, {
+  wrapMode: "none",
+  fg: "#ffffff",
+  content: "Start",
+});
+startButton.add(startButtonText);
+startButton.onMouseDown = () => {
+  void startStreaming();
+};
+selectionFooter.add(selectionFooterText);
+selectionFooter.add(startButton);
+
+selectionView.add(selectionHeader);
+selectionView.add(selectionListPanel);
+selectionView.add(selectionFooter);
 
 const header = new BoxRenderable(renderer, {
   height: 5,
@@ -389,14 +484,17 @@ const footerText = new TextRenderable(renderer, {
 });
 footer.add(footerText);
 
-layout.add(header);
-layout.add(logBox);
-layout.add(footer);
-renderer.root.add(layout);
+logView.add(header);
+logView.add(logBox);
+logView.add(footer);
 
 const fileStates = new Map<string, FileState>();
 const pendingFiles = new Set<string>();
 const logEntries: LogLine[] = [];
+const selectedFiles = new Set<string>();
+const fileRows: FileRow[] = [];
+let selectionCursor = 0;
+let selectionActive = true;
 
 let paused = false;
 let scheduledRender = false;
@@ -416,6 +514,19 @@ const merger = new LogMerger(
     appendEvent({ timestamp: event.timestamp, source: event.source, line: event.line });
   },
 );
+
+async function listLogFiles(): Promise<string[]> {
+  const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    includeRegex.lastIndex = 0;
+    if (!includeRegex.test(entry.name)) continue;
+    files.push(path.join(directory, entry.name));
+  }
+  files.sort();
+  return files;
+}
 
 function formatTimestamp(timestamp: number): string {
   const date = new Date(timestamp);
@@ -532,6 +643,116 @@ function scheduleRender(): void {
 function updateStatus(): void {
   const statusLine = paused ? "PAUSED" : "LIVE";
   headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Lines: ${logEntries.length}/${cliOptions.maxLines}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
+}
+
+function updateSelectionHeader(): void {
+  const count = selectedFiles.size;
+  selectionHeaderText.content = `Dir: ${directory}\nFound: ${fileRows.length} | Selected: ${count}`;
+}
+
+function updateStartButton(): void {
+  const enabled = selectedFiles.size > 0;
+  startButton.backgroundColor = enabled ? START_ENABLED_BG : START_DISABLED_BG;
+}
+
+function updateSelectionRow(row: FileRow, index: number): void {
+  const isCursor = index === selectionCursor;
+  const isSelected = row.selected;
+  row.label.content = `${isSelected ? "[x]" : "[ ]"} ${row.fileName}`;
+
+  if (isCursor && isSelected) {
+    row.row.backgroundColor = ROW_CURSOR_SELECTED_BG;
+  } else if (isSelected) {
+    row.row.backgroundColor = ROW_SELECTED_BG;
+  } else if (isCursor) {
+    row.row.backgroundColor = ROW_CURSOR_BG;
+  } else {
+    row.row.backgroundColor = "transparent";
+  }
+}
+
+function refreshSelectionUI(): void {
+  fileRows.forEach((row, index) => {
+    updateSelectionRow(row, index);
+  });
+  updateSelectionHeader();
+  updateStartButton();
+}
+
+function toggleSelection(index: number): void {
+  const row = fileRows[index];
+  if (!row) return;
+  row.selected = !row.selected;
+  if (row.selected) {
+    selectedFiles.add(row.filePath);
+  } else {
+    selectedFiles.delete(row.filePath);
+  }
+  refreshSelectionUI();
+}
+
+function setSelectionCursor(index: number): void {
+  if (fileRows.length === 0) {
+    selectionCursor = 0;
+    return;
+  }
+  selectionCursor = Math.max(0, Math.min(index, fileRows.length - 1));
+  refreshSelectionUI();
+}
+
+async function populateSelectionList(): Promise<void> {
+  const files = await listLogFiles();
+  fileRows.length = 0;
+  selectedFiles.clear();
+
+  for (const filePath of files) {
+    const fileName = path.basename(filePath);
+    const row = new BoxRenderable(renderer, {
+      height: 1,
+      width: "100%",
+      backgroundColor: "transparent",
+    });
+    const label = new TextRenderable(renderer, {
+      wrapMode: "none",
+      content: `[ ] ${fileName}`,
+    });
+    row.add(label);
+    const rowEntry: FileRow = { filePath, fileName, row, label, selected: false };
+    row.onMouseDown = () => {
+      const index = fileRows.indexOf(rowEntry);
+      if (index >= 0) {
+        selectionCursor = index;
+        toggleSelection(index);
+      }
+    };
+    fileRows.push(rowEntry);
+    selectionList.add(row);
+  }
+
+  selectionCursor = 0;
+  refreshSelectionUI();
+}
+
+async function startStreaming(): Promise<void> {
+  if (!selectionActive || selectedFiles.size === 0) return;
+  selectionActive = false;
+  selectionView.visible = false;
+  logView.visible = true;
+  renderer.useMouse = false;
+
+  initializing = true;
+  logEntries.length = 0;
+  logEntries.push({ timestamp: Date.now(), source: "system", line: "Starting log stream..." });
+  followTailEnabled = true;
+  cursorIndex = Math.max(0, logEntries.length - 1);
+
+  for (const filePath of selectedFiles) {
+    await startWatchingFile(filePath);
+  }
+
+  merger.flushAll();
+  scheduleRender();
+  initializing = false;
 }
 
 function parseTimestamp(line: string, state: FileState): number {
@@ -673,47 +894,9 @@ async function startWatchingFile(filePath: string): Promise<void> {
   }
 }
 
-async function scanDirectory(): Promise<void> {
-  const entries = await fs.promises.readdir(directory, { withFileTypes: true });
-  const files = entries
-    .filter((entry) => {
-      if (!entry.isFile()) return false;
-      includeRegex.lastIndex = 0;
-      return includeRegex.test(entry.name);
-    })
-    .map((entry) => path.join(directory, entry.name));
-
-  for (const filePath of files) {
-    await startWatchingFile(filePath);
-  }
-
-  merger.flushAll();
-  scheduleRender();
-}
-
-const directoryWatcher = fs.watch(directory, { persistent: true }, (eventType, fileName) => {
-  if (!fileName) return;
-  const name = fileName.toString();
-  includeRegex.lastIndex = 0;
-  if (!includeRegex.test(name)) return;
-  const filePath = path.join(directory, name);
-
-  if (eventType === "rename") {
-    fs.promises
-      .stat(filePath)
-      .then((stat) => {
-        if (stat.isFile()) {
-          void startWatchingFile(filePath);
-        }
-      })
-      .catch(() => removeFile(filePath));
-  }
-});
-
 function shutdown(exitCode: number): void {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  directoryWatcher.close();
   for (const state of fileStates.values()) {
     state.watcher?.close();
   }
@@ -727,6 +910,27 @@ function shutdown(exitCode: number): void {
 renderer.keyInput.on("keypress", (key) => {
   if (key.name === "q") {
     shutdown(0);
+  }
+
+  if (selectionActive) {
+    const keyName = key.name?.toLowerCase();
+    if (keyName === "up" || keyName === "k") {
+      setSelectionCursor(selectionCursor - 1);
+      return;
+    }
+    if (keyName === "down" || keyName === "j") {
+      setSelectionCursor(selectionCursor + 1);
+      return;
+    }
+    if (keyName === "space") {
+      toggleSelection(selectionCursor);
+      return;
+    }
+    if (keyName === "enter" || keyName === "return") {
+      void startStreaming();
+      return;
+    }
+    return;
   }
 
   const viewportHeight = Math.max(1, logText.height || 1);
@@ -783,12 +987,13 @@ flushTimer = setInterval(() => {
   if (!paused && !initializing) {
     merger.flushReady();
   }
-  updateStatus();
+  if (!selectionActive) {
+    updateStatus();
+  }
 }, 100);
 
-logEntries.push({ timestamp: Date.now(), source: "system", line: "Waiting for log lines..." });
-updateStatus();
-await scanDirectory();
+selectionHeaderText.content = "Loading log files...";
+await populateSelectionList();
 initializing = false;
 
 process.on("SIGINT", () => {
