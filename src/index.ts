@@ -47,14 +47,6 @@ type JsonInfo = {
   collapsed: Set<string>;
 };
 
-type FileRow = {
-  filePath: string;
-  fileName: string;
-  row: BoxRenderable;
-  label: TextRenderable;
-  selected: boolean;
-};
-
 type StreamRow = {
   filePath: string;
   fileName: string;
@@ -112,8 +104,6 @@ const CURSOR_BG = "#2D333B";
 const ROW_CURSOR_BG = "#1F2937";
 const ROW_SELECTED_BG = "#243B53";
 const ROW_CURSOR_SELECTED_BG = "#2E4A6B";
-const START_ENABLED_BG = "#1D4ED8";
-const START_DISABLED_BG = "#374151";
 const sourceColorMap = new Map<string, string>();
 let nextSourceColorIndex = 0;
 
@@ -368,16 +358,7 @@ if (!dirStat || !dirStat.isDirectory()) {
   process.exit(1);
 }
 
-const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: true });
-
-const selectionView = new BoxRenderable(renderer, {
-  position: "absolute",
-  width: "100%",
-  height: "100%",
-  flexDirection: "column",
-  padding: 1,
-  gap: 1,
-});
+const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: false });
 
 const logView = new BoxRenderable(renderer, {
   position: "absolute",
@@ -386,79 +367,9 @@ const logView = new BoxRenderable(renderer, {
   flexDirection: "column",
   padding: 1,
   gap: 1,
-  visible: false,
 });
 
-renderer.root.add(selectionView);
 renderer.root.add(logView);
-
-const selectionHeader = new BoxRenderable(renderer, {
-  height: 4,
-  border: true,
-  title: "Select Log Files",
-  paddingLeft: 1,
-  paddingRight: 1,
-});
-const selectionHeaderText = new TextRenderable(renderer, {
-  wrapMode: "none",
-  attributes: TextAttributes.DIM,
-  content: "",
-});
-selectionHeader.add(selectionHeaderText);
-
-const selectionListPanel = new BoxRenderable(renderer, {
-  flexGrow: 1,
-  border: true,
-  title: "Files",
-  padding: 1,
-  flexDirection: "column",
-  gap: 0,
-});
-const selectionList = new BoxRenderable(renderer, {
-  flexDirection: "column",
-  gap: 0,
-  flexGrow: 1,
-});
-selectionListPanel.add(selectionList);
-
-const selectionFooter = new BoxRenderable(renderer, {
-  height: 3,
-  border: true,
-  title: "Actions",
-  paddingLeft: 1,
-  paddingRight: 1,
-  flexDirection: "row",
-  alignItems: "center",
-  justifyContent: "space-between",
-});
-const selectionFooterText = new TextRenderable(renderer, {
-  wrapMode: "none",
-  attributes: TextAttributes.DIM,
-  content: "Click/space to toggle, Enter to start, q to quit",
-});
-const startButton = new BoxRenderable(renderer, {
-  height: 1,
-  paddingLeft: 2,
-  paddingRight: 2,
-  backgroundColor: START_DISABLED_BG,
-  justifyContent: "center",
-  alignItems: "center",
-});
-const startButtonText = new TextRenderable(renderer, {
-  wrapMode: "none",
-  fg: "#ffffff",
-  content: "Start",
-});
-startButton.add(startButtonText);
-startButton.onMouseDown = () => {
-  void startStreaming();
-};
-selectionFooter.add(selectionFooterText);
-selectionFooter.add(startButton);
-
-selectionView.add(selectionHeader);
-selectionView.add(selectionListPanel);
-selectionView.add(selectionFooter);
 
 const header = new BoxRenderable(renderer, {
   height: 5,
@@ -523,7 +434,7 @@ const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
   content:
-    "q quit | b back | tab files | space toggle (files) | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
+    "q quit | tab files | space toggle (files) | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
 });
 footer.add(footerText);
 
@@ -536,12 +447,8 @@ logView.add(footer);
 const fileStates = new Map<string, FileState>();
 const pendingFiles = new Set<string>();
 const logEntries: LogLine[] = [];
-const selectedFiles = new Set<string>();
-const fileRows: FileRow[] = [];
 const streamRows: StreamRow[] = [];
 const enabledSources = new Set<string>();
-let selectionCursor = 0;
-let selectionActive = true;
 let streamCursor = 0;
 let streamPanelFocused = false;
 
@@ -940,40 +847,6 @@ function updateStatus(): void {
   headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Enabled: ${enabledSources.size}/${streamRows.length} | Entries: ${logEntries.length}/${cliOptions.maxLines} | View lines: ${renderedLines.length}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
 }
 
-function updateSelectionHeader(): void {
-  const count = selectedFiles.size;
-  selectionHeaderText.content = `Dir: ${directory}\nFound: ${fileRows.length} | Selected: ${count}`;
-}
-
-function updateStartButton(): void {
-  const enabled = selectedFiles.size > 0;
-  startButton.backgroundColor = enabled ? START_ENABLED_BG : START_DISABLED_BG;
-}
-
-function updateSelectionRow(row: FileRow, index: number): void {
-  const isCursor = index === selectionCursor;
-  const isSelected = row.selected;
-  row.label.content = `${isSelected ? "[x]" : "[ ]"} ${row.fileName}`;
-
-  if (isCursor && isSelected) {
-    row.row.backgroundColor = ROW_CURSOR_SELECTED_BG;
-  } else if (isSelected) {
-    row.row.backgroundColor = ROW_SELECTED_BG;
-  } else if (isCursor) {
-    row.row.backgroundColor = ROW_CURSOR_BG;
-  } else {
-    row.row.backgroundColor = "transparent";
-  }
-}
-
-function refreshSelectionUI(): void {
-  fileRows.forEach((row, index) => {
-    updateSelectionRow(row, index);
-  });
-  updateSelectionHeader();
-  updateStartButton();
-}
-
 function updateStreamPanelTitle(): void {
   streamPanel.title = `Files (${enabledSources.size}/${streamRows.length})`;
 }
@@ -1023,7 +896,7 @@ function setStreamCursor(index: number): void {
   refreshStreamPanel();
 }
 
-function populateStreamPanel(): void {
+function populateStreamPanel(files: string[]): void {
   streamRows.length = 0;
   enabledSources.clear();
 
@@ -1032,9 +905,7 @@ function populateStreamPanel(): void {
     streamList.remove(child.id);
   }
 
-  const sorted = Array.from(selectedFiles).sort((a, b) => {
-    return path.basename(a).localeCompare(path.basename(b));
-  });
+  const sorted = [...files].sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
 
   for (const filePath of sorted) {
     const fileName = path.basename(filePath);
@@ -1066,94 +937,7 @@ function populateStreamPanel(): void {
   refreshStreamPanel();
 }
 
-function toggleSelection(index: number): void {
-  const row = fileRows[index];
-  if (!row) return;
-  row.selected = !row.selected;
-  if (row.selected) {
-    selectedFiles.add(row.filePath);
-  } else {
-    selectedFiles.delete(row.filePath);
-  }
-  refreshSelectionUI();
-}
-
-function setSelectionCursor(index: number): void {
-  if (fileRows.length === 0) {
-    selectionCursor = 0;
-    return;
-  }
-  selectionCursor = Math.max(0, Math.min(index, fileRows.length - 1));
-  refreshSelectionUI();
-}
-
-async function populateSelectionList(preserveSelections: boolean): Promise<void> {
-  const files = await listLogFiles();
-  fileRows.length = 0;
-  if (!preserveSelections) {
-    selectedFiles.clear();
-  }
-
-  const fileSet = new Set(files);
-  if (preserveSelections) {
-    for (const filePath of selectedFiles) {
-      if (!fileSet.has(filePath)) {
-        selectedFiles.delete(filePath);
-      }
-    }
-  }
-
-  const existing = selectionList.getChildren();
-  for (const child of existing) {
-    selectionList.remove(child.id);
-  }
-
-  for (const filePath of files) {
-    const fileName = path.basename(filePath);
-    const row = new BoxRenderable(renderer, {
-      height: 1,
-      width: "100%",
-      backgroundColor: "transparent",
-    });
-    const label = new TextRenderable(renderer, {
-      wrapMode: "none",
-      content: `[ ] ${fileName}`,
-    });
-    row.add(label);
-    const isSelected = selectedFiles.has(filePath);
-    const rowEntry: FileRow = { filePath, fileName, row, label, selected: isSelected };
-    row.onMouseDown = () => {
-      const index = fileRows.indexOf(rowEntry);
-      if (index >= 0) {
-        selectionCursor = index;
-        toggleSelection(index);
-      }
-    };
-    fileRows.push(rowEntry);
-    selectionList.add(row);
-  }
-
-  if (preserveSelections && selectedFiles.size > 0) {
-    const firstSelected = fileRows.findIndex((row) => row.selected);
-    selectionCursor = firstSelected >= 0 ? firstSelected : 0;
-  } else {
-    selectionCursor = 0;
-  }
-  refreshSelectionUI();
-}
-
-async function startStreaming(): Promise<void> {
-  if (!selectionActive || selectedFiles.size === 0) return;
-  selectionActive = false;
-  selectionView.visible = false;
-  logView.visible = true;
-  renderer.useMouse = false;
-  populateStreamPanel();
-
-  await resetStreamState();
-}
-
-async function resetStreamState(): Promise<void> {
+async function resetStreamState(filePaths: string[]): Promise<void> {
   initializing = true;
   logEntries.length = 0;
   renderedLines = [];
@@ -1167,7 +951,7 @@ async function resetStreamState(): Promise<void> {
   fileStates.clear();
   pendingFiles.clear();
 
-  for (const filePath of selectedFiles) {
+  for (const filePath of filePaths) {
     await startWatchingFile(filePath);
   }
 
@@ -1176,37 +960,10 @@ async function resetStreamState(): Promise<void> {
   initializing = false;
 }
 
-async function returnToSelection(): Promise<void> {
-  if (selectionActive) return;
-  selectionActive = true;
-  selectionView.visible = true;
-  logView.visible = false;
-  renderer.useMouse = true;
-
-  for (const state of fileStates.values()) {
-    state.watcher?.close();
-  }
-  fileStates.clear();
-  pendingFiles.clear();
-
-  logEntries.length = 0;
-  renderedLines = [];
-  cursorIndex = 0;
-  followTailEnabled = true;
-  logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
-  logText.scrollY = 0;
-
-  streamRows.length = 0;
-  enabledSources.clear();
-  streamCursor = 0;
-  streamPanelFocused = false;
-  const existing = streamList.getChildren();
-  for (const child of existing) {
-    streamList.remove(child.id);
-  }
-  updateStreamPanelTitle();
-
-  await populateSelectionList(true);
+async function initializeStreaming(): Promise<void> {
+  const files = await listLogFiles();
+  populateStreamPanel(files);
+  await resetStreamState(files);
 }
 
 function parseTimestamp(line: string, state: FileState): number {
@@ -1366,32 +1123,6 @@ renderer.keyInput.on("keypress", (key) => {
     shutdown(0);
   }
 
-  if (selectionActive) {
-    const keyName = key.name?.toLowerCase();
-    if (keyName === "up" || keyName === "k") {
-      setSelectionCursor(selectionCursor - 1);
-      return;
-    }
-    if (keyName === "down" || keyName === "j") {
-      setSelectionCursor(selectionCursor + 1);
-      return;
-    }
-    if (keyName === "space") {
-      toggleSelection(selectionCursor);
-      return;
-    }
-    if (keyName === "enter" || keyName === "return") {
-      void startStreaming();
-      return;
-    }
-    return;
-  }
-
-  if (key.name === "b") {
-    void returnToSelection();
-    return;
-  }
-
   const viewportHeight = Math.max(1, logText.height || 1);
   const pageSize = Math.max(1, viewportHeight - 1);
   const keyName = key.name?.toLowerCase();
@@ -1479,13 +1210,10 @@ flushTimer = setInterval(() => {
   if (!paused && !initializing) {
     merger.flushReady();
   }
-  if (!selectionActive) {
-    updateStatus();
-  }
+  updateStatus();
 }, 100);
 
-selectionHeaderText.content = "Loading log files...";
-await populateSelectionList(false);
+await initializeStreaming();
 initializing = false;
 
 process.on("SIGINT", () => {
