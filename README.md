@@ -25,9 +25,9 @@ bun run src/index.ts --dir /path/to/logs
 - `--include` (default: `.*\\.log$`): Filename regex filter
 - `--ts-regex` (default: ISO-8601 matcher): Regex with a capture group for the timestamp
 - `--ts-flags` (default: empty): Regex flags
-- `--delay-ms` (default: `500`): Buffer delay before emitting events
-- `--inactive-ms` (default: `2000`): Treat files as inactive after this idle time
-- `--idle-flush-ms` (default: `2000`): Flush remaining buffered lines after idle time
+- `--delay-ms` (default: `100`): Buffer delay before emitting events
+- `--inactive-ms` (default: `500`): Treat files as inactive after this idle time
+- `--idle-flush-ms` (default: `500`): Flush remaining buffered lines after idle time
 - `--max-lines` (default: `2000`): Max lines kept in the viewport
 - `--start-at` (default: `beginning`): `beginning` or `end`
 

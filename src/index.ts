@@ -50,9 +50,9 @@ const DEFAULT_OPTIONS: CliOptions = {
   include: ".*\\.log$",
   tsRegexSource: DEFAULT_TS_REGEX,
   tsRegexFlags: "",
-  delayMs: 500,
-  inactiveMs: 2000,
-  idleFlushMs: 2000,
+  delayMs: 100,
+  inactiveMs: 500,
+  idleFlushMs: 500,
   maxLines: 2000,
   startAt: "beginning",
   help: false,
@@ -648,7 +648,7 @@ flushTimer = setInterval(() => {
     merger.flushReady();
   }
   updateStatus();
-}, 1000);
+}, 100);
 
 logLines.push("Waiting for log lines...");
 updateStatus();
