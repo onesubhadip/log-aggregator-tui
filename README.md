@@ -37,7 +37,12 @@ bun run src/index.ts --dir /path/to/logs
 - `p` or `space`: pause/resume
 - `f`: follow (jump to bottom)
 - `c`: clear the viewport
-- `m`: toggle mouse mode
-  - app mode: mouse scrolling inside the TUI
-  - terminal mode: native selection + `Cmd+C` copy
-  - log pane is borderless to avoid copying UI border characters
+- `↑/↓` or `j/k`: scroll one line
+- `PgUp/PgDn`: scroll by page
+- `Home/End`: jump to top/bottom
+- highlighted line shows the current cursor position
+- log pane is borderless to avoid copying UI border characters
+
+## Log Colors
+
+Each log source (file name) is assigned a distinct color for quick identification.

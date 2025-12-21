@@ -1,9 +1,13 @@
 import {
   BoxRenderable,
-  ScrollBoxRenderable,
   TextAttributes,
   TextRenderable,
+  StyledText,
   createCliRenderer,
+  bg,
+  dim,
+  fg,
+  type TextChunk,
 } from "@opentui/core";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -29,6 +33,12 @@ type LogEvent = {
   line: string;
   source: string;
   sequence: number;
+};
+
+type LogLine = {
+  timestamp: number;
+  line: string;
+  source: string;
 };
 
 type FileState = {
@@ -57,6 +67,21 @@ const DEFAULT_OPTIONS: CliOptions = {
   startAt: "beginning",
   help: false,
 };
+
+const SOURCE_COLORS = [
+  "#0057FF",
+  "#B000FF",
+  "#C77D00",
+  "#008A2E",
+  "#D00000",
+  "#007A8C",
+  "#6B00FF",
+  "#8A4B00",
+] as const;
+const SYSTEM_COLOR = "#6B7280";
+const CURSOR_BG = "#2D333B";
+const sourceColorMap = new Map<string, string>();
+let nextSourceColorIndex = 0;
 
 class MinHeap<T> {
   private items: T[] = [];
@@ -309,7 +334,7 @@ if (!dirStat || !dirStat.isDirectory()) {
   process.exit(1);
 }
 
-const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: true });
+const renderer = await createCliRenderer({ exitOnCtrlC: true, useMouse: false });
 
 const layout = new BoxRenderable(renderer, {
   flexDirection: "column",
@@ -333,16 +358,11 @@ const headerText = new TextRenderable(renderer, {
 });
 header.add(headerText);
 
-const logBox = new ScrollBoxRenderable(renderer, {
+const logBox = new BoxRenderable(renderer, {
   flexGrow: 1,
-  stickyScroll: true,
-  stickyStart: "bottom",
-  scrollX: true,
-  scrollY: true,
-  contentOptions: {
-    paddingLeft: 1,
-    paddingRight: 1,
-  },
+  overflow: "hidden",
+  paddingLeft: 1,
+  paddingRight: 1,
 });
 
 const logText = new TextRenderable(renderer, {
@@ -350,6 +370,8 @@ const logText = new TextRenderable(renderer, {
   content: "",
   selectionBg: "#335577",
   selectionFg: "#ffffff",
+  width: "100%",
+  height: "100%",
 });
 logBox.add(logText);
 
@@ -363,7 +385,7 @@ const footer = new BoxRenderable(renderer, {
 const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
-  content: "q quit | p/space pause | f follow | c clear | m mouse mode",
+  content: "q quit | p/space pause | f follow | c clear | arrows/pg scroll",
 });
 footer.add(footerText);
 
@@ -374,14 +396,15 @@ renderer.root.add(layout);
 
 const fileStates = new Map<string, FileState>();
 const pendingFiles = new Set<string>();
-const logLines: string[] = [];
+const logEntries: LogLine[] = [];
 
 let paused = false;
 let scheduledRender = false;
 let initializing = true;
 let isShuttingDown = false;
 let flushTimer: NodeJS.Timeout | undefined;
-let mouseCaptureEnabled = true;
+let cursorIndex = 0;
+let followTailEnabled = true;
 
 const merger = new LogMerger(
   {
@@ -390,7 +413,7 @@ const merger = new LogMerger(
     idleFlushMs: cliOptions.idleFlushMs,
   },
   (event) => {
-    appendLine(formatEvent(event));
+    appendEvent({ timestamp: event.timestamp, source: event.source, line: event.line });
   },
 );
 
@@ -400,15 +423,95 @@ function formatTimestamp(timestamp: number): string {
   return date.toISOString().replace("T", " ").replace("Z", "");
 }
 
-function formatEvent(event: LogEvent): string {
-  return `${formatTimestamp(event.timestamp)} [${event.source}] ${event.line}`;
+function colorForSource(source: string): string {
+  if (source === "system") return SYSTEM_COLOR;
+  const existing = sourceColorMap.get(source);
+  if (existing) return existing;
+  const color = SOURCE_COLORS[nextSourceColorIndex % SOURCE_COLORS.length];
+  nextSourceColorIndex += 1;
+  sourceColorMap.set(source, color);
+  return color;
 }
 
-function appendLine(line: string): void {
-  logLines.push(line);
-  if (logLines.length > cliOptions.maxLines) {
-    logLines.splice(0, logLines.length - cliOptions.maxLines);
+function formatEventStyled(event: LogLine): StyledText {
+  const time = formatTimestamp(event.timestamp);
+  const sourceColor = colorForSource(event.source);
+  const sourceLabel = `[${event.source}]`;
+  return new StyledText([
+    dim(time),
+    { __isChunk: true, text: " ", attributes: 0 },
+    fg(sourceColor)(sourceLabel),
+    { __isChunk: true, text: " ", attributes: 0 },
+    { __isChunk: true, text: event.line, attributes: 0 },
+  ]);
+}
+
+function applyCursorHighlight(styled: StyledText): StyledText {
+  const applyBg = bg(CURSOR_BG);
+  return new StyledText(styled.chunks.map((chunk) => applyBg(chunk)));
+}
+
+function buildStyledLog(entries: LogLine[]): StyledText {
+  if (entries.length === 0) {
+    return new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
   }
+
+  const chunks: TextChunk[] = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const styled = i === cursorIndex ? applyCursorHighlight(formatEventStyled(entries[i])) : formatEventStyled(entries[i]);
+    chunks.push(...styled.chunks);
+    if (i < entries.length - 1) {
+      chunks.push({ __isChunk: true, text: "\n", attributes: 0 });
+    }
+  }
+  return new StyledText(chunks);
+}
+
+function appendEvent(event: LogLine): void {
+  logEntries.push(event);
+  if (logEntries.length > cliOptions.maxLines) {
+    const removed = logEntries.length - cliOptions.maxLines;
+    logEntries.splice(0, removed);
+    cursorIndex = Math.max(0, cursorIndex - removed);
+  }
+  scheduleRender();
+}
+
+function ensureCursorVisible(): void {
+  const viewportHeight = Math.max(1, logText.height || 1);
+  const top = logText.scrollY;
+  const bottom = top + viewportHeight - 1;
+  let nextTop = top;
+  if (cursorIndex < top) {
+    nextTop = cursorIndex;
+  } else if (cursorIndex > bottom) {
+    nextTop = Math.max(0, cursorIndex - viewportHeight + 1);
+  }
+  if (nextTop !== top) {
+    logText.scrollY = nextTop;
+  }
+}
+
+function setCursor(index: number): void {
+  if (logEntries.length === 0) {
+    cursorIndex = 0;
+    return;
+  }
+  cursorIndex = Math.max(0, Math.min(index, logEntries.length - 1));
+  ensureCursorVisible();
+  scheduleRender();
+}
+
+function moveCursor(delta: number): void {
+  if (logEntries.length === 0) return;
+  followTailEnabled = false;
+  setCursor(cursorIndex + delta);
+}
+
+function followTail(): void {
+  followTailEnabled = true;
+  cursorIndex = Math.max(0, logEntries.length - 1);
+  logText.scrollY = logText.maxScrollY;
   scheduleRender();
 }
 
@@ -417,15 +520,18 @@ function scheduleRender(): void {
   scheduledRender = true;
   setTimeout(() => {
     scheduledRender = false;
-    logText.content = logLines.join("\n");
+    logText.content = buildStyledLog(logEntries);
+    if (followTailEnabled) {
+      cursorIndex = Math.max(0, logEntries.length - 1);
+      logText.scrollY = logText.maxScrollY;
+    }
     updateStatus();
   }, 16);
 }
 
 function updateStatus(): void {
   const statusLine = paused ? "PAUSED" : "LIVE";
-  const mouseMode = mouseCaptureEnabled ? "app" : "terminal";
-  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Lines: ${logLines.length}/${cliOptions.maxLines}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize} | Mouse: ${mouseMode}`;
+  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Lines: ${logEntries.length}/${cliOptions.maxLines}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
 }
 
 function parseTimestamp(line: string, state: FileState): number {
@@ -623,10 +729,33 @@ renderer.keyInput.on("keypress", (key) => {
     shutdown(0);
   }
 
-  if (key.name === "m") {
-    mouseCaptureEnabled = !mouseCaptureEnabled;
-    renderer.useMouse = mouseCaptureEnabled;
-    updateStatus();
+  const viewportHeight = Math.max(1, logText.height || 1);
+  const pageSize = Math.max(1, viewportHeight - 1);
+  const keyName = key.name?.toLowerCase();
+  if (keyName === "up" || keyName === "k") {
+    moveCursor(-1);
+    return;
+  }
+  if (keyName === "down" || keyName === "j") {
+    moveCursor(1);
+    return;
+  }
+  if (keyName === "pageup" || keyName === "prior") {
+    moveCursor(-pageSize);
+    return;
+  }
+  if (keyName === "pagedown" || keyName === "next") {
+    moveCursor(pageSize);
+    return;
+  }
+  if (keyName === "home") {
+    followTailEnabled = false;
+    setCursor(0);
+    return;
+  }
+  if (keyName === "end") {
+    followTail();
+    return;
   }
 
   if (key.name === "p" || key.name === "space") {
@@ -639,14 +768,13 @@ renderer.keyInput.on("keypress", (key) => {
   }
 
   if (key.name === "f") {
-    logBox.stickyScroll = true;
-    logBox.stickyStart = "bottom";
-    logBox.scrollTo({ y: logBox.scrollHeight });
+    followTail();
   }
 
   if (key.name === "c") {
-    logLines.length = 0;
-    logText.content = "";
+    logEntries.length = 0;
+    cursorIndex = 0;
+    logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
     updateStatus();
   }
 });
@@ -658,7 +786,7 @@ flushTimer = setInterval(() => {
   updateStatus();
 }, 100);
 
-logLines.push("Waiting for log lines...");
+logEntries.push({ timestamp: Date.now(), source: "system", line: "Waiting for log lines..." });
 updateStatus();
 await scanDirectory();
 initializing = false;
