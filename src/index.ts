@@ -434,7 +434,7 @@ const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
   content:
-    "q quit | tab files | space toggle (files) | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
+    "q quit | s sidebar | tab files | space toggle (files) | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
 });
 footer.add(footerText);
 
@@ -451,6 +451,7 @@ const streamRows: StreamRow[] = [];
 const enabledSources = new Set<string>();
 let streamCursor = 0;
 let streamPanelFocused = false;
+let streamPanelVisible = true;
 
 let paused = false;
 let scheduledRender = false;
@@ -874,6 +875,13 @@ function refreshStreamPanel(): void {
   updateStreamPanelTitle();
 }
 
+function toggleStreamPanelVisibility(): void {
+  streamPanelVisible = !streamPanelVisible;
+  streamPanel.visible = streamPanelVisible;
+  streamPanelFocused = streamPanelVisible;
+  refreshStreamPanel();
+}
+
 function toggleStreamRow(index: number): void {
   const row = streamRows[index];
   if (!row) return;
@@ -1126,7 +1134,14 @@ renderer.keyInput.on("keypress", (key) => {
   const viewportHeight = Math.max(1, logText.height || 1);
   const pageSize = Math.max(1, viewportHeight - 1);
   const keyName = key.name?.toLowerCase();
+  if (keyName === "s") {
+    toggleStreamPanelVisibility();
+    return;
+  }
   if (keyName === "tab") {
+    if (!streamPanelVisible) {
+      return;
+    }
     streamPanelFocused = !streamPanelFocused;
     refreshStreamPanel();
     return;
