@@ -55,9 +55,25 @@ type StreamRow = {
   enabled: boolean;
 };
 
+type Bookmark = {
+  id: number;
+  entryIndex: number;
+  lineText: string;
+  nodePath?: string;
+  label: string;
+  lineIndex: number | null;
+};
+
+type BookmarkRow = {
+  bookmarkId: number;
+  row: BoxRenderable;
+  label: TextRenderable;
+};
+
 type RenderLine = {
   chunks: TextChunk[];
   entryIndex: number;
+  text: string;
   nodePath?: string;
   togglePath?: string;
 };
@@ -391,13 +407,19 @@ const logMain = new BoxRenderable(renderer, {
   gap: 1,
 });
 
+const sidebar = new BoxRenderable(renderer, {
+  width: 32,
+  flexDirection: "column",
+  gap: 1,
+});
+
 const streamPanel = new BoxRenderable(renderer, {
-  width: 28,
   border: true,
   title: "Files",
   padding: 1,
   flexDirection: "column",
   gap: 0,
+  flexGrow: 2,
 });
 const streamList = new BoxRenderable(renderer, {
   flexDirection: "column",
@@ -405,6 +427,21 @@ const streamList = new BoxRenderable(renderer, {
   flexGrow: 1,
 });
 streamPanel.add(streamList);
+
+const bookmarkPanel = new BoxRenderable(renderer, {
+  border: true,
+  title: "Bookmarks",
+  padding: 1,
+  flexDirection: "column",
+  gap: 0,
+  flexGrow: 1,
+});
+const bookmarkList = new BoxRenderable(renderer, {
+  flexDirection: "column",
+  gap: 0,
+  flexGrow: 1,
+});
+bookmarkPanel.add(bookmarkList);
 
 const logBox = new BoxRenderable(renderer, {
   flexGrow: 1,
@@ -434,12 +471,14 @@ const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
   content:
-    "q quit | s sidebar | tab files | space toggle (files) | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
+    "q quit | s sidebar | tab focus | space toggle/jump | m bookmark | d delete bookmark | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
 });
 footer.add(footerText);
 
 logView.add(header);
-logMain.add(streamPanel);
+sidebar.add(streamPanel);
+sidebar.add(bookmarkPanel);
+logMain.add(sidebar);
 logMain.add(logBox);
 logView.add(logMain);
 logView.add(footer);
@@ -449,8 +488,13 @@ const pendingFiles = new Set<string>();
 const logEntries: LogLine[] = [];
 const streamRows: StreamRow[] = [];
 const enabledSources = new Set<string>();
+const bookmarks: Bookmark[] = [];
+const bookmarkRows: BookmarkRow[] = [];
+let nextBookmarkId = 1;
 let streamCursor = 0;
+let bookmarkCursor = 0;
 let streamPanelFocused = false;
+let bookmarkPanelFocused = false;
 let streamPanelVisible = true;
 
 let paused = false;
@@ -557,6 +601,7 @@ function makeRenderLine(
   return {
     chunks: [...prefix, { __isChunk: true, text, attributes: 0 }],
     entryIndex,
+    text,
     nodePath,
     togglePath,
   };
@@ -658,6 +703,45 @@ function buildRenderedLines(entries: LogLine[]): RenderLine[] {
   return lines;
 }
 
+function truncateText(text: string, maxLength: number): string {
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function buildBookmarkLabel(entry: LogLine, lineText: string): string {
+  const summary = truncateText(lineText.trim(), 40);
+  return `${formatTimestamp(entry.timestamp)} [${entry.source}] ${summary}`;
+}
+
+function syncBookmarksWithRenderedLines(): void {
+  if (bookmarks.length === 0) return;
+  const byEntry = new Map<number, { index: number; text: string; nodePath?: string }[]>();
+  for (let i = 0; i < renderedLines.length; i += 1) {
+    const line = renderedLines[i];
+    const list = byEntry.get(line.entryIndex);
+    const item = { index: i, text: line.text, nodePath: line.nodePath };
+    if (list) {
+      list.push(item);
+    } else {
+      byEntry.set(line.entryIndex, [item]);
+    }
+  }
+
+  for (const bookmark of bookmarks) {
+    const candidates = byEntry.get(bookmark.entryIndex);
+    if (!candidates) {
+      bookmark.lineIndex = null;
+      continue;
+    }
+    let match = candidates.find((candidate) => candidate.nodePath && candidate.nodePath === bookmark.nodePath);
+    if (!match) {
+      match = candidates.find((candidate) => candidate.text === bookmark.lineText);
+    }
+    bookmark.lineIndex = match ? match.index : null;
+  }
+  refreshBookmarkPanel();
+}
+
 function buildStyledFromRendered(lines: RenderLine[], highlightIndex: number): StyledText {
   if (lines.length === 0) {
     return new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
@@ -687,6 +771,19 @@ function appendEvent(event: LogLine): void {
   if (logEntries.length > cliOptions.maxLines) {
     const removed = logEntries.length - cliOptions.maxLines;
     logEntries.splice(0, removed);
+    if (removed > 0 && bookmarks.length > 0) {
+      for (let i = bookmarks.length - 1; i >= 0; i -= 1) {
+        const bookmark = bookmarks[i];
+        bookmark.entryIndex -= removed;
+        if (bookmark.entryIndex < 0) {
+          bookmarks.splice(i, 1);
+        }
+      }
+      if (bookmarkCursor >= bookmarks.length) {
+        bookmarkCursor = Math.max(0, bookmarks.length - 1);
+      }
+      rebuildBookmarkList();
+    }
     if (renderedLines.length > 0) {
       let removedLineCount = 0;
       for (const line of renderedLines) {
@@ -839,6 +936,7 @@ function scheduleRender(): void {
     } else {
       ensureCursorVisible();
     }
+    syncBookmarksWithRenderedLines();
     updateStatus();
   }, 16);
 }
@@ -850,6 +948,10 @@ function updateStatus(): void {
 
 function updateStreamPanelTitle(): void {
   streamPanel.title = `Files (${enabledSources.size}/${streamRows.length})`;
+}
+
+function updateBookmarkPanelTitle(): void {
+  bookmarkPanel.title = `Bookmarks (${bookmarks.length})`;
 }
 
 function updateStreamRow(row: StreamRow, index: number): void {
@@ -875,10 +977,59 @@ function refreshStreamPanel(): void {
   updateStreamPanelTitle();
 }
 
+function updateBookmarkRow(row: BookmarkRow, index: number): void {
+  const isCursor = bookmarkPanelFocused && index === bookmarkCursor;
+  const bookmark = bookmarks.find((item) => item.id === row.bookmarkId);
+  if (!bookmark) return;
+  const hiddenLabel = bookmark.lineIndex === null ? " [hidden]" : "";
+  row.label.content = `${index + 1}. ${bookmark.label}${hiddenLabel}`;
+  row.row.backgroundColor = isCursor ? ROW_CURSOR_BG : "transparent";
+}
+
+function refreshBookmarkPanel(): void {
+  bookmarkRows.forEach((row, index) => {
+    updateBookmarkRow(row, index);
+  });
+  updateBookmarkPanelTitle();
+}
+
+function rebuildBookmarkList(): void {
+  bookmarkRows.length = 0;
+  const existing = bookmarkList.getChildren();
+  for (const child of existing) {
+    bookmarkList.remove(child.id);
+  }
+
+  for (const bookmark of bookmarks) {
+    const row = new BoxRenderable(renderer, {
+      height: 1,
+      width: "100%",
+      backgroundColor: "transparent",
+    });
+    const label = new TextRenderable(renderer, {
+      wrapMode: "none",
+      content: "",
+    });
+    row.add(label);
+    const rowEntry: BookmarkRow = { bookmarkId: bookmark.id, row, label };
+    bookmarkRows.push(rowEntry);
+    bookmarkList.add(row);
+  }
+
+  if (bookmarkCursor >= bookmarks.length) {
+    bookmarkCursor = Math.max(0, bookmarks.length - 1);
+  }
+  refreshBookmarkPanel();
+}
+
 function toggleStreamPanelVisibility(): void {
   streamPanelVisible = !streamPanelVisible;
-  streamPanel.visible = streamPanelVisible;
-  streamPanelFocused = streamPanelVisible;
+  sidebar.visible = streamPanelVisible;
+  if (!streamPanelVisible) {
+    setSidebarFocus("none");
+  } else {
+    setSidebarFocus("files");
+  }
   refreshStreamPanel();
 }
 
@@ -895,6 +1046,48 @@ function toggleStreamRow(index: number): void {
   scheduleRender();
 }
 
+function toggleBookmarkAtCursor(): void {
+  const line = renderedLines[cursorIndex];
+  if (!line) return;
+  const entry = logEntries[line.entryIndex];
+  if (!entry) return;
+  const lineText = line.text;
+  const existingIndex = bookmarks.findIndex(
+    (bookmark) =>
+      bookmark.entryIndex === line.entryIndex &&
+      bookmark.lineText === lineText &&
+      bookmark.nodePath === line.nodePath,
+  );
+  if (existingIndex >= 0) {
+    bookmarks.splice(existingIndex, 1);
+    rebuildBookmarkList();
+    scheduleRender();
+    return;
+  }
+
+  const bookmark: Bookmark = {
+    id: nextBookmarkId++,
+    entryIndex: line.entryIndex,
+    lineText,
+    nodePath: line.nodePath,
+    label: buildBookmarkLabel(entry, lineText),
+    lineIndex: cursorIndex,
+  };
+  bookmarks.push(bookmark);
+  rebuildBookmarkList();
+  scheduleRender();
+}
+
+function jumpToBookmark(index: number): void {
+  const bookmark = bookmarks[index];
+  if (!bookmark) return;
+  if (bookmark.lineIndex === null) {
+    return;
+  }
+  followTailEnabled = false;
+  setCursor(bookmark.lineIndex);
+}
+
 function setStreamCursor(index: number): void {
   if (streamRows.length === 0) {
     streamCursor = 0;
@@ -902,6 +1095,22 @@ function setStreamCursor(index: number): void {
   }
   streamCursor = Math.max(0, Math.min(index, streamRows.length - 1));
   refreshStreamPanel();
+}
+
+function setBookmarkCursor(index: number): void {
+  if (bookmarks.length === 0) {
+    bookmarkCursor = 0;
+    return;
+  }
+  bookmarkCursor = Math.max(0, Math.min(index, bookmarks.length - 1));
+  refreshBookmarkPanel();
+}
+
+function setSidebarFocus(mode: "none" | "files" | "bookmarks"): void {
+  streamPanelFocused = mode === "files";
+  bookmarkPanelFocused = mode === "bookmarks";
+  refreshStreamPanel();
+  refreshBookmarkPanel();
 }
 
 function populateStreamPanel(files: string[]): void {
@@ -941,7 +1150,7 @@ function populateStreamPanel(files: string[]): void {
   }
 
   streamCursor = 0;
-  streamPanelFocused = false;
+  setSidebarFocus("none");
   refreshStreamPanel();
 }
 
@@ -970,6 +1179,10 @@ async function resetStreamState(filePaths: string[]): Promise<void> {
 
 async function initializeStreaming(): Promise<void> {
   const files = await listLogFiles();
+  bookmarks.length = 0;
+  bookmarkCursor = 0;
+  nextBookmarkId = 1;
+  rebuildBookmarkList();
   populateStreamPanel(files);
   await resetStreamState(files);
 }
@@ -1142,8 +1355,13 @@ renderer.keyInput.on("keypress", (key) => {
     if (!streamPanelVisible) {
       return;
     }
-    streamPanelFocused = !streamPanelFocused;
-    refreshStreamPanel();
+    if (!streamPanelFocused && !bookmarkPanelFocused) {
+      setSidebarFocus("files");
+    } else if (streamPanelFocused && bookmarks.length > 0) {
+      setSidebarFocus("bookmarks");
+    } else {
+      setSidebarFocus("none");
+    }
     return;
   }
   if (streamPanelFocused) {
@@ -1157,6 +1375,28 @@ renderer.keyInput.on("keypress", (key) => {
     }
     if (keyName === "space" || keyName === "enter" || keyName === "return") {
       toggleStreamRow(streamCursor);
+      return;
+    }
+  }
+  if (bookmarkPanelFocused) {
+    if (keyName === "up" || keyName === "k") {
+      setBookmarkCursor(bookmarkCursor - 1);
+      return;
+    }
+    if (keyName === "down" || keyName === "j") {
+      setBookmarkCursor(bookmarkCursor + 1);
+      return;
+    }
+    if (keyName === "space" || keyName === "enter" || keyName === "return") {
+      jumpToBookmark(bookmarkCursor);
+      return;
+    }
+    if (keyName === "d" || keyName === "backspace" || keyName === "delete") {
+      if (bookmarks.length > 0) {
+        bookmarks.splice(bookmarkCursor, 1);
+        rebuildBookmarkList();
+        scheduleRender();
+      }
       return;
     }
   }
@@ -1189,6 +1429,10 @@ renderer.keyInput.on("keypress", (key) => {
     toggleJsonAtCursor();
     return;
   }
+  if (keyName === "m") {
+    toggleBookmarkAtCursor();
+    return;
+  }
   if (keyName === "a") {
     expandAllJson();
     return;
@@ -1217,6 +1461,9 @@ renderer.keyInput.on("keypress", (key) => {
     cursorIndex = 0;
     logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
     logText.scrollY = 0;
+    bookmarks.length = 0;
+    bookmarkCursor = 0;
+    rebuildBookmarkList();
     updateStatus();
   }
 });
