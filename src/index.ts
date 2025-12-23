@@ -564,7 +564,7 @@ function parseJsonInfo(line: string): JsonInfo | undefined {
     return undefined;
   }
   try {
-    return { value: JSON.parse(trimmed), collapsed: new Set<string>() };
+    return { value: JSON.parse(trimmed), collapsed: new Set<string>(["$"]) };
   } catch {
     return undefined;
   }
