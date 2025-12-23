@@ -122,6 +122,8 @@ const ROW_SELECTED_BG = "#243B53";
 const ROW_CURSOR_SELECTED_BG = "#2E4A6B";
 const sourceColorMap = new Map<string, string>();
 let nextSourceColorIndex = 0;
+const FOOTER_KEYS =
+  "q quit | s sidebar | tab focus | space toggle/jump | m bookmark | d delete bookmark | / search | n next | N prev | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll";
 
 class MinHeap<T> {
   private items: T[] = [];
@@ -388,7 +390,7 @@ const logView = new BoxRenderable(renderer, {
 renderer.root.add(logView);
 
 const header = new BoxRenderable(renderer, {
-  height: 5,
+  height: 6,
   border: true,
   title: "Log Stream",
   paddingLeft: 1,
@@ -470,8 +472,7 @@ const footer = new BoxRenderable(renderer, {
 const footerText = new TextRenderable(renderer, {
   wrapMode: "none",
   attributes: TextAttributes.DIM,
-  content:
-    "q quit | s sidebar | tab focus | space toggle/jump | m bookmark | d delete bookmark | p pause | f follow | c clear | e expand/collapse | a expand all | x collapse all | arrows/pg scroll",
+  content: FOOTER_KEYS,
 });
 footer.add(footerText);
 
@@ -496,6 +497,12 @@ let bookmarkCursor = 0;
 let streamPanelFocused = false;
 let bookmarkPanelFocused = false;
 let streamPanelVisible = true;
+let searchActive = false;
+let searchInput = "";
+let searchQuery = "";
+let searchOriginalQuery = "";
+let searchHits: number[] = [];
+let searchIndex = -1;
 
 let paused = false;
 let scheduledRender = false;
@@ -711,6 +718,68 @@ function truncateText(text: string, maxLength: number): string {
 function buildBookmarkLabel(entry: LogLine, lineText: string): string {
   const summary = truncateText(lineText.trim(), 40);
   return `${formatTimestamp(entry.timestamp)} [${entry.source}] ${summary}`;
+}
+
+function updateFooter(): void {
+  if (searchActive) {
+    const query = searchInput || "";
+    footerText.content = `Search: ${query} | enter apply | esc cancel | backspace delete`;
+  } else {
+    footerText.content = FOOTER_KEYS;
+  }
+}
+
+function buildSearchStatus(): string {
+  if (!searchQuery) return "Search: off";
+  const label = truncateText(searchQuery, 40);
+  if (searchHits.length === 0) {
+    return `Search: "${label}" (0/0)`;
+  }
+  const current = searchIndex >= 0 ? searchIndex + 1 : 0;
+  return `Search: "${label}" (${current}/${searchHits.length})`;
+}
+
+function updateSearchResults(resetIndex: boolean): void {
+  if (!searchQuery) {
+    searchHits = [];
+    searchIndex = -1;
+    return;
+  }
+  const previousLine = searchIndex >= 0 ? searchHits[searchIndex] : null;
+  const needle = searchQuery.toLowerCase();
+  const hits: number[] = [];
+  for (let i = 0; i < renderedLines.length; i += 1) {
+    const line = renderedLines[i];
+    if (line.text.toLowerCase().includes(needle)) {
+      hits.push(i);
+    }
+  }
+  searchHits = hits;
+  if (searchHits.length === 0) {
+    searchIndex = -1;
+    return;
+  }
+  if (!resetIndex && previousLine !== null) {
+    const preserved = searchHits.indexOf(previousLine);
+    if (preserved >= 0) {
+      searchIndex = preserved;
+      return;
+    }
+  }
+  const nextIndex = searchHits.findIndex((index) => index >= cursorIndex);
+  searchIndex = nextIndex >= 0 ? nextIndex : 0;
+}
+
+function jumpToSearchHit(direction: 1 | -1): void {
+  if (searchHits.length === 0) return;
+  if (searchIndex < 0) {
+    searchIndex = 0;
+  } else {
+    const next = (searchIndex + direction + searchHits.length) % searchHits.length;
+    searchIndex = next;
+  }
+  followTailEnabled = false;
+  setCursor(searchHits[searchIndex]);
 }
 
 function syncBookmarksWithRenderedLines(): void {
@@ -936,6 +1005,7 @@ function scheduleRender(): void {
     } else {
       ensureCursorVisible();
     }
+    updateSearchResults(false);
     syncBookmarksWithRenderedLines();
     updateStatus();
   }, 16);
@@ -943,7 +1013,8 @@ function scheduleRender(): void {
 
 function updateStatus(): void {
   const statusLine = paused ? "PAUSED" : "LIVE";
-  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Enabled: ${enabledSources.size}/${streamRows.length} | Entries: ${logEntries.length}/${cliOptions.maxLines} | View lines: ${renderedLines.length}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}`;
+  const searchLine = buildSearchStatus();
+  headerText.content = `Dir: ${directory}\nFiles: ${fileStates.size} (filter: ${cliOptions.include}) | Enabled: ${enabledSources.size}/${streamRows.length} | Entries: ${logEntries.length}/${cliOptions.maxLines} | View lines: ${renderedLines.length}\nDelay: ${cliOptions.delayMs}ms | Inactive: ${cliOptions.inactiveMs}ms | Idle flush: ${cliOptions.idleFlushMs}ms | ${statusLine} | Buffered: ${merger.bufferSize}\n${searchLine}`;
 }
 
 function updateStreamPanelTitle(): void {
@@ -1344,9 +1415,58 @@ renderer.keyInput.on("keypress", (key) => {
     shutdown(0);
   }
 
+  if (searchActive) {
+    const keyName = key.name?.toLowerCase();
+    if (keyName === "escape") {
+      searchActive = false;
+      searchQuery = searchOriginalQuery;
+      searchInput = searchOriginalQuery;
+      updateSearchResults(true);
+      updateStatus();
+      updateFooter();
+      return;
+    }
+    if (keyName === "enter" || keyName === "return") {
+      searchActive = false;
+      updateSearchResults(true);
+      updateStatus();
+      updateFooter();
+      if (searchHits.length > 0) {
+        followTailEnabled = false;
+        setCursor(searchHits[searchIndex]);
+      }
+      return;
+    }
+    if (keyName === "backspace" || keyName === "delete") {
+      searchInput = searchInput.slice(0, -1);
+      searchQuery = searchInput;
+      updateSearchResults(true);
+      updateStatus();
+      updateFooter();
+      return;
+    }
+    const sequence = key.sequence ?? "";
+    if (sequence.length === 1 && !key.ctrl && !key.meta) {
+      searchInput += sequence;
+      searchQuery = searchInput;
+      updateSearchResults(true);
+      updateStatus();
+      updateFooter();
+      return;
+    }
+    return;
+  }
+
   const viewportHeight = Math.max(1, logText.height || 1);
   const pageSize = Math.max(1, viewportHeight - 1);
   const keyName = key.name?.toLowerCase();
+  if (keyName === "/" || keyName === "slash" || key.sequence === "/") {
+    searchActive = true;
+    searchOriginalQuery = searchQuery;
+    searchInput = searchQuery;
+    updateFooter();
+    return;
+  }
   if (keyName === "s") {
     toggleStreamPanelVisibility();
     return;
@@ -1429,6 +1549,14 @@ renderer.keyInput.on("keypress", (key) => {
     toggleJsonAtCursor();
     return;
   }
+  if (keyName === "n") {
+    if (key.shift || key.sequence === "N") {
+      jumpToSearchHit(-1);
+    } else {
+      jumpToSearchHit(1);
+    }
+    return;
+  }
   if (keyName === "m") {
     toggleBookmarkAtCursor();
     return;
@@ -1476,6 +1604,7 @@ flushTimer = setInterval(() => {
 }, 100);
 
 await initializeStreaming();
+updateFooter();
 initializing = false;
 
 process.on("SIGINT", () => {
