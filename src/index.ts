@@ -1419,9 +1419,10 @@ renderer.keyInput.on("keypress", (key) => {
     const keyName = key.name?.toLowerCase();
     if (keyName === "escape") {
       searchActive = false;
-      searchQuery = searchOriginalQuery;
-      searchInput = searchOriginalQuery;
-      updateSearchResults(true);
+      searchQuery = "";
+      searchInput = "";
+      searchHits = [];
+      searchIndex = -1;
       updateStatus();
       updateFooter();
       return;
