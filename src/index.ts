@@ -117,6 +117,8 @@ const SOURCE_COLORS = [
 ] as const;
 const SYSTEM_COLOR = "#6B7280";
 const CURSOR_BG = "#2D333B";
+const SEARCH_HIGHLIGHT_COLOR = "#FBBF24";
+const SEARCH_HIGHLIGHT_BG = "#3B2F0F";
 const ROW_CURSOR_BG = "#1F2937";
 const ROW_SELECTED_BG = "#243B53";
 const ROW_CURSOR_SELECTED_BG = "#2E4A6B";
@@ -818,9 +820,50 @@ function buildStyledFromRendered(lines: RenderLine[], highlightIndex: number): S
 
   const chunks: TextChunk[] = [];
   const applyBg = bg(CURSOR_BG);
+  const applySearchStyle = (chunk: TextChunk): TextChunk =>
+    bg(SEARCH_HIGHLIGHT_BG)(
+      fg(SEARCH_HIGHLIGHT_COLOR)({
+        ...chunk,
+        attributes: (chunk.attributes ?? 0) | TextAttributes.BOLD | TextAttributes.INVERSE,
+      }),
+    );
+  const query = searchQuery.toLowerCase();
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-    const lineChunks = i === highlightIndex ? line.chunks.map((chunk) => applyBg(chunk)) : line.chunks;
+    let lineChunks = line.chunks;
+    if (query.length > 0) {
+      const textChunk = line.chunks[line.chunks.length - 1];
+      if (textChunk && line.text) {
+        const haystack = line.text.toLowerCase();
+        let offset = 0;
+        const matchedChunks: TextChunk[] = [];
+        const prefixChunks = line.chunks.slice(0, -1);
+        let idx = haystack.indexOf(query, offset);
+        if (idx >= 0) {
+          while (idx >= 0) {
+            if (idx > offset) {
+              const plainText = line.text.slice(offset, idx);
+              matchedChunks.push({ ...textChunk, text: plainText });
+            }
+            const matchText = line.text.slice(idx, idx + query.length);
+            const highlightChunk = applySearchStyle({
+              ...textChunk,
+              text: matchText,
+            });
+            matchedChunks.push(highlightChunk);
+            offset = idx + query.length;
+            idx = haystack.indexOf(query, offset);
+          }
+          if (offset < line.text.length) {
+            matchedChunks.push({ ...textChunk, text: line.text.slice(offset) });
+          }
+          lineChunks = [...prefixChunks, ...matchedChunks];
+        }
+      }
+    }
+    if (i === highlightIndex) {
+      lineChunks = lineChunks.map((chunk) => applyBg(chunk));
+    }
     chunks.push(...lineChunks);
     if (i < lines.length - 1) {
       chunks.push({ __isChunk: true, text: "\n", attributes: 0 });
