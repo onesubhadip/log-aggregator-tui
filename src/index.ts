@@ -505,6 +505,9 @@ let searchQuery = "";
 let searchOriginalQuery = "";
 let searchHits: number[] = [];
 let searchIndex = -1;
+let renderedDirty = true;
+let searchDirty = false;
+let viewTop = 0;
 
 let paused = false;
 let scheduledRender = false;
@@ -813,8 +816,13 @@ function syncBookmarksWithRenderedLines(): void {
   refreshBookmarkPanel();
 }
 
-function buildStyledFromRendered(lines: RenderLine[], highlightIndex: number): StyledText {
-  if (lines.length === 0) {
+function buildStyledFromRendered(
+  lines: RenderLine[],
+  highlightIndex: number,
+  start: number,
+  count: number,
+): StyledText {
+  if (lines.length === 0 || count <= 0) {
     return new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
   }
 
@@ -828,7 +836,8 @@ function buildStyledFromRendered(lines: RenderLine[], highlightIndex: number): S
       }),
     );
   const query = searchQuery.toLowerCase();
-  for (let i = 0; i < lines.length; i += 1) {
+  const end = Math.min(lines.length, start + count);
+  for (let i = start; i < end; i += 1) {
     const line = lines[i];
     let lineChunks = line.chunks;
     if (query.length > 0) {
@@ -865,7 +874,7 @@ function buildStyledFromRendered(lines: RenderLine[], highlightIndex: number): S
       lineChunks = lineChunks.map((chunk) => applyBg(chunk));
     }
     chunks.push(...lineChunks);
-    if (i < lines.length - 1) {
+    if (i < end - 1) {
       chunks.push({ __isChunk: true, text: "\n", attributes: 0 });
     }
   }
@@ -880,6 +889,7 @@ function appendEvent(event: LogLine): void {
     }
   }
   logEntries.push(event);
+  renderedDirty = true;
   if (logEntries.length > cliOptions.maxLines) {
     const removed = logEntries.length - cliOptions.maxLines;
     logEntries.splice(0, removed);
@@ -911,6 +921,15 @@ function appendEvent(event: LogLine): void {
   scheduleRender();
 }
 
+function getViewportHeight(): number {
+  return Math.max(1, logText.height || 1);
+}
+
+function clampViewTop(): void {
+  const maxTop = Math.max(0, renderedLines.length - getViewportHeight());
+  viewTop = Math.max(0, Math.min(viewTop, maxTop));
+}
+
 function ensureCursorVisible(): void {
   if (renderedLines.length === 0) {
     cursorIndex = 0;
@@ -920,18 +939,14 @@ function ensureCursorVisible(): void {
   if (cursorIndex > maxIndex) {
     cursorIndex = maxIndex;
   }
-  const viewportHeight = Math.max(1, logText.height || 1);
-  const top = logText.scrollY;
-  const bottom = top + viewportHeight - 1;
-  let nextTop = top;
-  if (cursorIndex < top) {
-    nextTop = cursorIndex;
+  const viewportHeight = getViewportHeight();
+  const bottom = viewTop + viewportHeight - 1;
+  if (cursorIndex < viewTop) {
+    viewTop = cursorIndex;
   } else if (cursorIndex > bottom) {
-    nextTop = Math.max(0, cursorIndex - viewportHeight + 1);
+    viewTop = Math.max(0, cursorIndex - viewportHeight + 1);
   }
-  if (nextTop !== top) {
-    logText.scrollY = nextTop;
-  }
+  clampViewTop();
 }
 
 function setCursor(index: number): void {
@@ -953,7 +968,7 @@ function moveCursor(delta: number): void {
 function followTail(): void {
   followTailEnabled = true;
   cursorIndex = Math.max(0, renderedLines.length - 1);
-  logText.scrollY = logText.maxScrollY;
+  viewTop = Math.max(0, renderedLines.length - getViewportHeight());
   scheduleRender();
 }
 
@@ -978,6 +993,7 @@ function toggleJsonAtCursor(): void {
     }
     entry.json.collapsed.add(togglePath);
   }
+  renderedDirty = true;
   scheduleRender();
 }
 
@@ -992,6 +1008,7 @@ function expandAllJson(): void {
   }
   if (changed) {
     followTailEnabled = false;
+    renderedDirty = true;
     scheduleRender();
   }
 }
@@ -1022,6 +1039,7 @@ function collapseAllJson(): void {
         }
       }
     }
+    renderedDirty = true;
     scheduleRender();
   }
 }
@@ -1031,25 +1049,33 @@ function scheduleRender(): void {
   scheduledRender = true;
   setTimeout(() => {
     scheduledRender = false;
-    renderedLines = buildRenderedLines(logEntries);
-    if (followTailEnabled) {
-      cursorIndex = Math.max(0, renderedLines.length - 1);
-    } else if (renderedLines.length > 0) {
-      cursorIndex = Math.max(0, Math.min(cursorIndex, renderedLines.length - 1));
-    } else {
+    const rebuild = renderedDirty;
+    if (rebuild) {
+      renderedLines = buildRenderedLines(logEntries);
+      renderedDirty = false;
+    }
+    if (rebuild || searchDirty) {
+      updateSearchResults(false);
+      searchDirty = false;
+    }
+    if (rebuild) {
+      syncBookmarksWithRenderedLines();
+    }
+
+    const viewportHeight = getViewportHeight();
+    if (renderedLines.length === 0) {
       cursorIndex = 0;
-    }
-    logText.content = buildStyledFromRendered(renderedLines, cursorIndex);
-    if (logText.scrollY > logText.maxScrollY) {
-      logText.scrollY = logText.maxScrollY;
-    }
-    if (followTailEnabled) {
-      logText.scrollY = logText.maxScrollY;
+      viewTop = 0;
+    } else if (followTailEnabled) {
+      cursorIndex = Math.max(0, renderedLines.length - 1);
+      viewTop = Math.max(0, renderedLines.length - viewportHeight);
     } else {
+      cursorIndex = Math.max(0, Math.min(cursorIndex, renderedLines.length - 1));
       ensureCursorVisible();
     }
-    updateSearchResults(false);
-    syncBookmarksWithRenderedLines();
+    clampViewTop();
+    logText.content = buildStyledFromRendered(renderedLines, cursorIndex, viewTop, viewportHeight);
+    logText.scrollY = 0;
     updateStatus();
   }, 16);
 }
@@ -1157,6 +1183,7 @@ function toggleStreamRow(index: number): void {
     enabledSources.delete(row.fileName);
   }
   refreshStreamPanel();
+  renderedDirty = true;
   scheduleRender();
 }
 
@@ -1274,7 +1301,9 @@ async function resetStreamState(filePaths: string[]): Promise<void> {
   renderedLines = [];
   cursorIndex = 0;
   followTailEnabled = true;
-  logText.scrollY = 0;
+  viewTop = 0;
+  renderedDirty = true;
+  searchDirty = true;
 
   for (const state of fileStates.values()) {
     state.watcher?.close();
@@ -1466,15 +1495,16 @@ renderer.keyInput.on("keypress", (key) => {
       searchInput = "";
       searchHits = [];
       searchIndex = -1;
-      updateStatus();
       updateFooter();
+      scheduleRender();
       return;
     }
     if (keyName === "enter" || keyName === "return") {
       searchActive = false;
       updateSearchResults(true);
-      updateStatus();
       updateFooter();
+      searchDirty = false;
+      scheduleRender();
       if (searchHits.length > 0) {
         followTailEnabled = false;
         setCursor(searchHits[searchIndex]);
@@ -1485,8 +1515,9 @@ renderer.keyInput.on("keypress", (key) => {
       searchInput = searchInput.slice(0, -1);
       searchQuery = searchInput;
       updateSearchResults(true);
-      updateStatus();
       updateFooter();
+      searchDirty = false;
+      scheduleRender();
       return;
     }
     const sequence = key.sequence ?? "";
@@ -1494,8 +1525,9 @@ renderer.keyInput.on("keypress", (key) => {
       searchInput += sequence;
       searchQuery = searchInput;
       updateSearchResults(true);
-      updateStatus();
       updateFooter();
+      searchDirty = false;
+      scheduleRender();
       return;
     }
     return;
@@ -1632,7 +1664,9 @@ renderer.keyInput.on("keypress", (key) => {
     renderedLines = [];
     cursorIndex = 0;
     logText.content = new StyledText([{ __isChunk: true, text: "", attributes: 0 }]);
-    logText.scrollY = 0;
+    viewTop = 0;
+    renderedDirty = true;
+    searchDirty = true;
     bookmarks.length = 0;
     bookmarkCursor = 0;
     rebuildBookmarkList();
