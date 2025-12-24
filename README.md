@@ -28,6 +28,8 @@ bun run src/index.ts --dir /path/to/logs
 - Search with next/prev hits and match count.
 - Keyboard scrolling with cursor highlight.
 
+[![asciinema demo](https://asciinema.org/a/U0CNH7mT8Ngv6CwjI8WUxsFtJ.svg)](https://asciinema.org/a/U0CNH7mT8Ngv6CwjI8WUxsFtJ)
+
 ## Usage
 
 On launch, the app starts streaming all matching log files in the folder. Use the sidebar to toggle files on/off.
