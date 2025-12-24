@@ -19,9 +19,18 @@ bun install
 bun run src/index.ts --dir /path/to/logs
 ```
 
-## Startup Selection
+## Features
 
-On launch, you will see a file list. Click (or use `↑/↓` + `space`) to select files. Press `Enter` or click `Start` to begin streaming.
+- Chronological merge of multiple log files (by timestamp regex).
+- File sidebar with per-file toggle while streaming.
+- JSON pretty printer with collapsible fields (collapsed by default).
+- Bookmarks panel: mark lines and jump between them.
+- Search with next/prev hits and match count.
+- Keyboard scrolling with cursor highlight.
+
+## Usage
+
+On launch, the app starts streaming all matching log files in the folder. Use the sidebar to toggle files on/off.
 
 ### Options
 
@@ -38,17 +47,22 @@ On launch, you will see a file list. Click (or use `↑/↓` + `space`) to selec
 ## Key Bindings
 
 - `q`: quit
-- `Enter`: start streaming (selection screen)
-- `space`: toggle file selection (selection screen)
-- `b`: back to selection screen (clears stream)
-- `p` or `space`: pause/resume
+- `s`: toggle sidebar (files + bookmarks)
+- `tab`: focus cycle (files -> bookmarks -> none)
+- `space`: toggle file (when files panel focused) / jump to bookmark (when bookmarks panel focused)
+- `m`: bookmark current log line
+- `d`: delete selected bookmark
+- `/`: search
+- `n` / `N`: next / previous search hit
+- `p`: pause/resume
 - `f`: follow (jump to bottom)
 - `c`: clear the viewport
+- `e`: expand/collapse JSON node
+- `a` / `x`: expand all / collapse all JSON
 - `↑/↓` or `j/k`: scroll one line
 - `PgUp/PgDn`: scroll by page
 - `Home/End`: jump to top/bottom
 - highlighted line shows the current cursor position
-- log pane is borderless to avoid copying UI border characters
 
 ## Log Colors
 
